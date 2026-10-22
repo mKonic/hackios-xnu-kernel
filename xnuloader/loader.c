@@ -4185,7 +4185,15 @@ ramfb_phone_screen(void)
 		uint32_t fourcc, flags, width, height, stride;
 	} __attribute__((packed)) cfg;
 	static struct {
-		uint32_t control, length;
+		/*
+		 * control is written back by QEMU when the DMA request completes (0 on success,
+		 * FW_CFG_DMA_CTL_ERROR set if it failed), so it must be volatile: without that the
+		 * compiler sees only its own store, folds the check below to "always non-zero", and
+		 * every ramfb request looks like it failed -- which leaves the display at the
+		 * firmware's 800x600 instead of the phone's 1125x2436.
+		 */
+		volatile uint32_t control;
+		uint32_t length;
 		uint64_t address;
 	} dma;
 	struct {
