@@ -128,6 +128,42 @@ of `redwood: unlock: asked, answer 1`.
 `os_log`, only the injection library's `say()` mentions it. Do not read its absence as "the lock
 screen never happened".
 
+## Four things that cost the most time
+
+Every one of these is a mistake that was actually made while getting this far, not advice
+written afterwards.
+
+**1. A warning going away is not a fix.** QEMU complains `Could not open option rom
+'vgabios-ramfb.bin'` on every boot. Installing `seabios` and copying the file silences it -- and
+changes nothing about whether the screen is drawn, because the ROM is a 16-bit x86 option ROM
+that never executes on aarch64. The real fault was the missing `volatile` (above), and the
+symptom that actually identifies it is the loader printing `display 800 x 600`. Choose a
+judgement that can be false: "the display is 1125x2436", not "the error is gone".
+
+**2. Silence is not a hang, and it is also not an absence.** First boot spends ~16 minutes in
+`lsd` making containers; the log is a wall of `usermanagerd` and `containermanagerd` errors and
+nothing that looks like progress. Judge by several indicators at once -- container count, QEMU's
+cpu time, the swap counter, a screenshot -- never by one counter sitting still. The converse bit
+just as hard: `SBLockScreenManager` appears **nowhere** in the log whether or not the lock screen
+happened, because it writes no `os_log`. A log tells you what happened; it cannot tell you what
+did not.
+
+**3. Observing something, plus a mechanism that explains it, is not a cause.** An earlier 6 GB
+boot ended shortly after SpringBoard started, and the memory numbers made "OOM killed" an
+obvious reading -- right up until `dmesg`, whose ring did cover that moment, turned out to hold
+no OOM record at all. The `Killed` lines in the surviving logs are launchd killing *guest*
+processes, which is a different thing entirely. The useful move was not finding contrary evidence
+but asking "if this were true, what should be here?" and looking for exactly that.
+
+**4. Check the artefact, not the process that made it.** `screendump.sh` reported a missing file
+for a screenshot QEMU had written correctly, because it named the PPM after the PNG. A tool that
+quietly misreports is worse than one that fails. When it matters, read the result back out of the
+image or the file: the job list was verified by
+
+    python3 tools/apfs/apfs.py cat userland/root.apfs /LaunchDaemons/com.apple.SpringBoard.plist
+
+rather than by trusting that `mkjobs.py` had run.
+
 ## PosterBoard: a real bug, but not the reason there was no lock screen
 
 This was checked before the above was found, and it corrected a wrong first guess, so it is kept.
