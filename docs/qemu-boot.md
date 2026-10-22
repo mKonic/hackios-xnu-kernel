@@ -73,9 +73,18 @@ SpringBoard `[homescreen]` -> `swap 1..17` -> the home screen, drawn:
 ![the home screen under QEMU](qemu-homescreen.png)
 
 Status bar, both widgets, every icon drawn from its real asset, the dock, the search pill.
-The two widgets are white because their contents are drawn by a GPU extension and this is the
-software renderer -- `redwood: no accelerated renderer; the software one will draw`, which is
-the injection library's intended path in QEMU, not a fault.
+
+The two widgets are white because nothing ever filled them in, and the reason is in the log, not
+in the renderer:
+
+    lsd: Failed to fetch app bundle unit: 0 for extension point: com.apple.widget-extension
+
+No widget extension process is ever spawned (`Successfully spawned` never matches a widget bundle),
+so there is no content to draw. That is not the accelerated-renderer path being absent --
+scripts still run and the dock and icons are drawn -- it is widget *discovery* failing, and it is
+the next thing to look at. (The software renderer message
+`redwood: no accelerated renderer; the software one will draw` is the injection library's intended
+path in QEMU, and it is not the cause of the blank widgets.)
 
 ## The lock screen: it is there, and the boot-arg that keeps it
 
@@ -126,7 +135,8 @@ With `com.apple.PosterBoard` named:
 
 * `Successfully spawned PosterBoard[38] because launch job`, and it goes on to start
   `com.apple.WallpaperKit.CollectionsPoster` (397 lines of wallpaper machinery);
-* the `failed lookup: name = com.apple.posterboardservices` warnings (3 of them) drop to **0**;
+* the `failed lookup: name = com.apple.posterboardservices.services` warnings drop from **2 to 0**
+  (counted, not guessed: `grep -c` on the two runs);
 * nothing regresses -- 662 containers, 17 swaps, and the home screen is still drawn.
 
 PosterBoard is therefore *not* what kept the lock screen away -- the ten-second unlock was (see
