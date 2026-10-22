@@ -77,10 +77,44 @@ The two widgets are white because their contents are drawn by a GPU extension an
 software renderer -- `redwood: no accelerated renderer; the software one will draw`, which is
 the injection library's intended path in QEMU, not a fault.
 
-## Why the home screen and not the lock screen
+## The lock screen: it is there, and the boot-arg that keeps it
 
-iOS 16 draws the lock screen through `com.apple.posterboardservices`. Its publisher is
-`com.apple.PosterBoard` -- and that is not a LaunchDaemon but a **LaunchAngel**.
+The lock screen is reached, but by default it is **dismissed after ten seconds**, by design and by
+our own code. `src/inject_sb.c` (userland) forces an unlock ten seconds after SpringBoard starts:
+
+    /* ... if touch is still probing, has failed, or the panel is a FocalTech and the firmware
+       upload is still chewing through ~114 KB of SPI ... the user ends up staring at a dark lock
+       screen with nothing to swipe. So we just forcibly dismiss it after 10 seconds so iOS always
+       lands on the home screen even in the worst case. */
+    dispatch_after(..., 10 * NSEC_PER_SEC, ..., ^{ unlock(); });
+
+So the lock screen *is* shown first. What proves it ran is the unlock call itself: `unlock()`
+(`inject_sb.c`) reports which of its three cases it took, and in the default boot it printed
+`redwood: unlock: asked, answer 1` -- not `not locked`. `isUILocked` was YES, and
+`unlockUIFromSource:` then succeeded. The home screen is what that unlock leaves behind.
+
+`autounlock=0` is the upstream switch for keeping it (its comment: "to show the phone starting
+the way an iPhone does"):
+
+```sh
+CMDLINE="cpus=4 autounlock=0" ./qemu/run-ios.sh 1200
+```
+
+![the lock screen under QEMU](qemu-lockscreen.png)
+
+Date, large clock, battery, the camera button and the home bar. To tell whether it worked, look
+for `redwood: the lock screen stays until it is swiped away (autounlock=0)` and for the *absence*
+of `redwood: unlock: asked, answer 1`.
+
+**Searching the log for `SBLockScreenManager` finds nothing either way**: it does not write
+`os_log`, only the injection library's `say()` mentions it. Do not read its absence as "the lock
+screen never happened".
+
+## PosterBoard: a real bug, but not the reason there was no lock screen
+
+This was checked before the above was found, and it corrected a wrong first guess, so it is kept.
+`com.apple.posterboardservices` is published by `com.apple.PosterBoard` -- which is not a
+LaunchDaemon but a **LaunchAngel**.
 
 `build.sh` deletes `System/Library/LaunchAngels` and points `LaunchDaemons` at our own directory,
 so all twelve angels are off the volume launchd reads. Naming one in `IOS_JOBS` used to fail
@@ -95,9 +129,10 @@ With `com.apple.PosterBoard` named:
 * the `failed lookup: name = com.apple.posterboardservices` warnings (3 of them) drop to **0**;
 * nothing regresses -- 662 containers, 17 swaps, and the home screen is still drawn.
 
-The screen is still the home screen, so resolving the service was necessary but not sufficient:
-SpringBoard does not enter the lock-screen state on this boot. The next thing to look at is what
-else the lock screen needs before `SBLockScreenManager` commits to it.
+PosterBoard is therefore *not* what kept the lock screen away -- the ten-second unlock was (see
+above), and the lock screen appears in a boot where PosterBoard is absent. The fix is still right
+on its own terms: those twelve jobs could not be asked for at all, and three failed lookups a
+session is a real defect.
 
 The twelve angels, and what each draws a part of, so the next person knows what is missing:
 
