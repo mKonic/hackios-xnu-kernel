@@ -8,16 +8,25 @@ before it worked. Measured on QEMU 8.2.2 (Debian/Ubuntu), aarch64 `virt`, pure T
 | | |
 |---|---|
 | guest RAM | `QEMU_RAM_GB=7` (the profile's default, `common/devices/qemu-virt.conf`) |
-| swap | **6 GB, and without it the run is OOM-killed** |
-| wall clock | 20 minutes: the lock screen does not appear in 15 |
+| swap | 6 GB recommended; see below |
+| wall clock | 20 minutes: the home screen does not appear in 15 |
 | disk | ~2.5 GB for `system.apfs`, plus the swap file |
 
-`QEMU_RAM_GB=7` is what gives the kernel the same 4.2 GB window it has on the phone. On a
-7.9 GB host that only fits because QEMU's own memory can be paged out: measured with 6 GB of
-swap, `MemAvailable` sits at ~1.5 GB through the run and swap stays at 0. **Without swap the
-same boot dies** -- the guest is killed (`run.sh: ... Killed`) a few seconds after SpringBoard
-starts, having reported `available 654 MB` of its own. At 6 GB of guest RAM the kernel has only
-~460 MB available and spends the session close to its own low-water kill thresholds.
+`QEMU_RAM_GB=7` is what gives the kernel the same 4.2 GB window it has on the phone, and it is
+what the runs that reached the home screen used. On a 7.9 GB host that only fits because QEMU's
+own memory can be paged out: with 6 GB of swap, `MemAvailable` sits at ~1.5 GB through the run
+and the host's swap stays unused.
+
+The guest's own headroom is the number that moved: at `QEMU_RAM_GB=6` it reported `available`
+around **460 MB** and `free 7 MB` for most of the session; at 7 GB it reports about **1357 MB**.
+That is the measurement this recommendation rests on.
+
+**Honest limit of the evidence**: an earlier 6 GB boot without swap did end shortly after
+SpringBoard started, and I first wrote that down as an OOM kill. It is not proven -- that log has
+since been overwritten, and `dmesg` (whose ring does cover the period) contains no OOM record at
+all. What is established is the comparison above and that every run which reached a drawn screen
+used 7 GB with swap available. Treat "you need swap" as a sensible precaution with a plausible
+mechanism, not as a measured fact.
 
 ## Two bugs that made it look like a dead display
 
