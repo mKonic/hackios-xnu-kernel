@@ -5,12 +5,17 @@ out=$(realpath -m "${1:-$(dirname "$(readlink -f "$0")")/../logs/qemu-screen.png
 mkdir -p "$(dirname "$out")"
 here=$(dirname "$(readlink -f "$0")")
 python3 - "$out" "${QEMU_INSTANCE:-$(cat "$here/instance" 2>/dev/null || echo 0)}" <<'PY'
-import socket, struct, sys, time, zlib, os
-out = sys.argv[1]; ppm = out + '.ppm'
+import socket, struct, sys, time, zlib, os, tempfile
+out = sys.argv[1]
+# QEMU writes a PPM; it must not be named after the PNG we are going to write. This used to be
+# out + '.ppm', which is wrong whenever out already ends in '.ppm' (it becomes 'x.ppm.png.ppm',
+# and 'x.ppm.png' then does not exist even though the dump worked) -- and it left a stray file
+# beside the picture. A temporary name makes the PPM an implementation detail.
+ppm = os.path.join(tempfile.mkdtemp(prefix='screendump.'), 'screen.ppm')
 s = socket.create_connection(('127.0.0.1', 4444 + 10 * int(sys.argv[2]))); s.settimeout(2)
 s.sendall(b'\n'); time.sleep(0.3)
 s.sendall(f'screendump {ppm}\n'.encode()); time.sleep(1.5)
-d = open(ppm, 'rb').read(); os.unlink(ppm)
+d = open(ppm, 'rb').read(); os.unlink(ppm); os.rmdir(os.path.dirname(ppm))
 magic, size, maxval, pix = d.split(b'\n', 3)
 w, h = map(int, size.split())
 # the kernel uses the top left 1125x2436 of a bigger mode as the phone's screen (boot-args fbwidth/fbheight)
