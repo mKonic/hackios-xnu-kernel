@@ -192,6 +192,16 @@ struct scfb_header {
 };
 static struct { uint64_t pa, size; uint32_t w, h; } scfb;
 
+/*
+ * Scion camera (SCCAM, avf/CAMERA.md): with the app's Camera setting, a second slice of RAM the app
+ * maps too, with sccam.addr= sccam.size= in the kernel parameters, below the framebuffer's. The app
+ * writes the Pixel's camera frames there and the kernel reads them (patch 1400, bsd/dev/redwood_camera.c);
+ * here it is kept out of the kernel's memory, and the device tree says there is a camera, which is
+ * how MobileGestalt (and so SpringBoard's Camera.app) finds one: as xnuloader's cam=5.
+ */
+#define SCCAM_MAGIC	0x4d434353u	/* "SCCM": the app writes the header before boot */
+static struct { uint64_t pa, size; } sccam;
+
 /* ---- the machine, from the FDT ---- */
 
 static struct {
@@ -678,6 +688,19 @@ void avfboot_main(uint64_t fdt_pa)
 		if (scfb.pa < win_end)
 			win_end = scfb.pa & ~(BASE_ALIGN - 1);
 	}
+	sccam.pa = arg_num(m.bootargs, "sccam.addr=");
+	sccam.size = arg_num(m.bootargs, "sccam.size=");
+	if (sccam.pa || sccam.size) {
+		if (sccam.pa < m.ram_lo || sccam.pa + sccam.size > m.ram_hi || (sccam.pa & 0xfff) || sccam.size < 0x10000)
+			die("sccam.addr/size do not describe a region in RAM");
+		if (*(volatile uint32_t *)sccam.pa != SCCAM_MAGIC)
+			uart_puts("avfboot: sccam: no header from the app (the kernel will not use it)\n");
+		if (sccam.pa < win_end)
+			win_end = sccam.pa & ~(BASE_ALIGN - 1);
+		uart_kv("avfboot: sccam ", sccam.pa);
+		uart_kv("+", sccam.size);
+		uart_putc('\n');
+	}
 	if (win_end <= phys_base)
 		die("not enough RAM");
 	uint64_t win_size = win_end - phys_base;
@@ -889,6 +912,10 @@ void avfboot_main(uint64_t fdt_pa)
 	dt_begin(&w, "haptics");
 	dt_identity(&w, identity_haptics, sizeof(identity_haptics) / sizeof(identity_haptics[0]), identity_haptics_data);
 	dt_end(&w);
+	if (sccam.pa) {
+		dt_begin(&w, "camera");	/* (MobileGestalt's video-camera) */
+		dt_end(&w);
+	}
 	dt_end(&w);
 
 	dt_begin(&w, "options");
@@ -941,6 +968,12 @@ void avfboot_main(uint64_t fdt_pa)
 		dt_prop_str(&w, "compatible", m.uart_kind == UART_8250 ? "ns16550a" : "arm,pl011");
 		dt_prop(&w, "reg", reg2, sizeof(reg2));
 		dt_prop_u32(&w, "boot-console", 1);
+		dt_end(&w);
+	}
+	if (sccam.pa) {
+		/* where MobileGestalt looks for the cameras: of the iPhone's ISP node, only the camera at the back (no driver matches it) */
+		dt_begin(&w, "isp");
+		dt_prop_u32(&w, "camera-rear", 1);
 		dt_end(&w);
 	}
 	dt_end(&w);	/* arm-io */

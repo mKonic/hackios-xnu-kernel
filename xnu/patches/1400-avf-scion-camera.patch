@@ -1,0 +1,498 @@
+diff --git a/bsd/dev/redwood_camera.c b/bsd/dev/redwood_camera.c
+index 133b179..b5030b0 100644
+--- a/bsd/dev/redwood_camera.c
++++ b/bsd/dev/redwood_camera.c
+@@ -3770,6 +3770,424 @@ fake_session(void)
+ 	    "another sensor asked for" : "nobody reads", ios_frames_done, ios_given);
+ }
+ 
++/*
++ * sccam.addr= (patch 1400; for the Android Virtualization Framework): /dev/redwood-camera with the
++ * frames of the camera of the phone the VM runs on. The Scion app lends the VM a slice of RAM it
++ * maps too, as it does the shared framebuffer (an ashmem region crosvm maps as guest memory: SCCAM,
++ * avf/CAMERA.md), and says where with sccam.addr= sccam.size= in the kernel parameters; avfboot keeps
++ * it out of the kernel's memory. The app's Camera2 capture writes NV12 frames into a ring of slots
++ * there, each slot guarded like a seqlock; the guest asks for frames, for a camera (back or front) and
++ * for a size in the header. The sessions, the two cameras (sensors 1 and 2 as camera_device.c knows
++ * them: 1 the back camera, 2 the front one) and the frame headers are cam=5's, and nothing of a phone's
++ * camera hardware is touched. Each frame of the app's is made into RAW10 in RGGB order at twice its
++ * size each way, every pixel one 2x2 cell (the colours as linear light, as bright as the exposure
++ * asked for makes them), so that everything above the kernel (the ISP of the media library, the
++ * capture graph, Camera.app) runs as it does on the phone. While the app gives no frames (no camera
++ * permission, the camera busy, a VM without the app) the frames are black, five a second.
++ *
++ *   sccam.addr=PA sccam.size=N   the region (the app's)
++ *   sccam.w=W sccam.h=H          the pictures' size (default 1280x960, 4:3 as the iPhone's sensors); the app's
++ *                                frames are cropped to that shape in the middle and scaled to it
++ *   sccam.turn=MASK              turn the back camera's (1) or the front camera's (2) frames half round
++ */
++#define SCCAM_MAGIC             0x4d434353u     /* "SCCM" */
++#define SCCAM_FOURCC_NV12       0x3231564eu
++#define SCCAM_FOURCC_NV21       0x3132564eu
++#define SCCAM_HOST_READY        1u              /* host_flags: the app is there and has the camera */
++#define SCCAM_MAX_SLOTS         4
++#define SCCAM_MAX_W             2048            /* the pictures' size at most (each way, before the doubling) */
++#define SCCAM_MAX_H             2048
++
++struct sccam_slot {
++	uint64_t        seq;            /* odd while the app writes the slot, else twice the frame's number */
++	uint64_t        time_ns;
++	uint32_t        offset, bytes;  /* the frame, from the region's start */
++	uint32_t        width, height, format;
++	uint32_t        stride_y, stride_uv, uv_offset; /* (uv_offset from the frame's start) */
++	uint32_t        facing, orientation;
++	uint32_t        reserved[2];
++};
++struct sccam_header {
++	uint32_t        magic, version, header_bytes, nslots, slot_bytes;
++	uint32_t        host_flags, host_state, host_error;
++	uint64_t        host_ns;
++	uint32_t        req_ack, cameras;
++	uint64_t        frame_seq;
++	uint32_t        latest, pad0;
++	/* the guest's (0x40) */
++	uint32_t        req_seq, req_on, req_facing, req_width, req_height, req_fps;
++	uint32_t        guest_reading, guest_flags;
++	uint64_t        guest_ns;
++	uint32_t        reserved[38];
++	struct sccam_slot slot[SCCAM_MAX_SLOTS];        /* (0x100) */
++};
++
++static bool host;
++static uint64_t host_pa, host_size;
++static volatile struct sccam_header *sccam;
++static uint32_t host_width = 1280, host_height = 960, host_turn;
++static struct ctab_mode host_mode;
++static uint16_t host_xmap[SCCAM_MAX_W];
++static uint16_t host_level[256];
++static uint64_t host_level_light;
++
++/* sRGB's 8-bit values as linear light, 65535 for white */
++static const uint16_t srgb_linear[256] = {
++	0, 20, 40, 60, 80, 99, 119, 139, 159, 179, 199, 219, 241, 264, 288, 313,
++	340, 367, 396, 427, 458, 491, 526, 562, 599, 637, 677, 718, 761, 805, 851, 898,
++	947, 997, 1048, 1101, 1156, 1212, 1270, 1330, 1391, 1453, 1517, 1583, 1651, 1720, 1790, 1863,
++	1937, 2013, 2090, 2170, 2250, 2333, 2418, 2504, 2592, 2681, 2773, 2866, 2961, 3058, 3157, 3258,
++	3360, 3464, 3570, 3678, 3788, 3900, 4014, 4129, 4247, 4366, 4488, 4611, 4736, 4864, 4993, 5124,
++	5257, 5392, 5530, 5669, 5810, 5953, 6099, 6246, 6395, 6547, 6700, 6856, 7014, 7174, 7335, 7500,
++	7666, 7834, 8004, 8177, 8352, 8528, 8708, 8889, 9072, 9258, 9445, 9635, 9828, 10022, 10219, 10417,
++	10619, 10822, 11028, 11235, 11446, 11658, 11873, 12090, 12309, 12530, 12754, 12980, 13209, 13440, 13673, 13909,
++	14146, 14387, 14629, 14874, 15122, 15371, 15623, 15878, 16135, 16394, 16656, 16920, 17187, 17456, 17727, 18001,
++	18277, 18556, 18837, 19121, 19407, 19696, 19987, 20281, 20577, 20876, 21177, 21481, 21787, 22096, 22407, 22721,
++	23038, 23357, 23678, 24002, 24329, 24658, 24990, 25325, 25662, 26001, 26344, 26688, 27036, 27386, 27739, 28094,
++	28452, 28813, 29176, 29542, 29911, 30282, 30656, 31033, 31412, 31794, 32179, 32567, 32957, 33350, 33745, 34143,
++	34544, 34948, 35355, 35764, 36176, 36591, 37008, 37429, 37852, 38278, 38706, 39138, 39572, 40009, 40449, 40891,
++	41337, 41785, 42236, 42690, 43147, 43606, 44069, 44534, 45002, 45473, 45947, 46423, 46903, 47385, 47871, 48359,
++	48850, 49344, 49841, 50341, 50844, 51349, 51858, 52369, 52884, 53401, 53921, 54445, 54971, 55500, 56032, 56567,
++	57105, 57646, 58190, 58737, 59287, 59840, 60396, 60955, 61517, 62082, 62650, 63221, 63795, 64372, 64952, 65535,
++};
++
++#define host_barrier()  __asm__ volatile ("dmb ish" : : : "memory")
++
++/* the region, mapped (cacheable, as the app's mapping is) and checked */
++static bool
++host_attach(void)
++{
++	uint32_t w = 0, h = 0;
++
++	(void)PE_parse_boot_argn("sccam.size", &host_size, sizeof(host_size));
++	(void)PE_parse_boot_argn("sccam.w", &w, sizeof(w));
++	(void)PE_parse_boot_argn("sccam.h", &h, sizeof(h));
++	(void)PE_parse_boot_argn("sccam.turn", &host_turn, sizeof(host_turn));
++	if (w >= 64 && w <= SCCAM_MAX_W && h >= 64 && h <= SCCAM_MAX_H) {
++		host_width = w & ~3u;
++		host_height = h & ~1u;
++	}
++	if ((host_pa & PAGE_MASK) != 0 || host_size < sizeof(struct sccam_header) || host_size > (1ull << 30)) {
++		printf("camera: sccam.addr=%#llx sccam.size=%#llx: not a region\n", host_pa, host_size);
++		return false;
++	}
++	sccam = (volatile struct sccam_header *)ml_io_map_unmappable((vm_offset_t)host_pa, (vm_size_t)round_page(host_size),
++	    VM_WIMG_DEFAULT);
++	if (sccam == NULL || sccam->magic != SCCAM_MAGIC || sccam->version != 1 || sccam->nslots == 0 ||
++	    sccam->nslots > SCCAM_MAX_SLOTS || sccam->header_bytes < sizeof(struct sccam_header)) {
++		printf("camera: no SCCAM header at %#llx (magic %#x)\n", host_pa, sccam != NULL ? sccam->magic : 0);
++		sccam = NULL;
++		return false;
++	}
++	printf("camera: the app's camera region at %#llx+%#llx: %u slots of %u KB; pictures %ux%u\n", host_pa, host_size,
++	    sccam->nslots, sccam->slot_bytes >> 10, host_width, host_height);
++	return true;
++}
++
++/* frames wanted (or not), of the camera of sensor `index' (2 the front one, else the back one) */
++static void
++host_request(bool on, unsigned index)
++{
++	volatile struct sccam_header *h = sccam;
++	uint64_t ns;
++
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	h->req_facing = index == 2 ? 1 : 0;
++	h->req_width = host_width;
++	h->req_height = host_height;
++	h->req_fps = 30;
++	h->guest_reading = 0;
++	h->guest_ns = ns;
++	h->req_on = on ? 1 : 0;
++	host_barrier();
++	h->req_seq = h->req_seq + 1;
++	host_barrier();
++}
++
++/* the levels of sRGB's 8-bit values for an exposure of `light' (lines times gain over unity) */
++static void
++host_levels(uint64_t light)
++{
++	uint64_t ref = (uint64_t)(host_mode.frame_length - EXPOSURE_MARGIN) * 8;
++
++	if (light == host_level_light) {
++		return;
++	}
++	host_level_light = light;
++	for (int i = 0; i < 256; i++) {
++		uint64_t level = 64 + (uint64_t)srgb_linear[i] * 959 * light / (ref * 65535);
++
++		host_level[i] = level > 1023 ? 1023 : (uint16_t)level;
++	}
++}
++
++/* two pixels of the app's (Y, Y, U, V) as two groups of RAW10: a, the R G R G line; b, the G B G B line */
++static inline void
++host_pair(uint8_t *a, uint8_t *b, int y0, int y1, int u, int v)
++{
++	int dr = (91881 * v) >> 16, dg = (22554 * u + 46802 * v) >> 16, db = (116130 * u) >> 16;
++	int c[6] = { y0 + dr, y0 - dg, y0 + db, y1 + dr, y1 - dg, y1 + db };
++	uint32_t l[6];
++
++	for (int i = 0; i < 6; i++) {
++		l[i] = host_level[c[i] < 0 ? 0 : c[i] > 255 ? 255 : c[i]];
++	}
++	/* a: R0 G0 R1 G1; b: G0 B0 G1 B1 */
++	a[0] = (uint8_t)(l[0] >> 2);
++	a[1] = (uint8_t)(l[1] >> 2);
++	a[2] = (uint8_t)(l[3] >> 2);
++	a[3] = (uint8_t)(l[4] >> 2);
++	a[4] = (uint8_t)((l[0] & 3) | (l[1] & 3) << 2 | (l[3] & 3) << 4 | (l[4] & 3) << 6);
++	b[0] = (uint8_t)(l[1] >> 2);
++	b[1] = (uint8_t)(l[2] >> 2);
++	b[2] = (uint8_t)(l[4] >> 2);
++	b[3] = (uint8_t)(l[5] >> 2);
++	b[4] = (uint8_t)((l[1] & 3) | (l[2] & 3) << 2 | (l[4] & 3) << 4 | (l[5] & 3) << 6);
++}
++
++/* place p black (the level of black in every site) */
++static void
++host_black(int p)
++{
++	uint8_t *at = (uint8_t *)(ring + (uint64_t)p * ring_place_bytes);
++	uint32_t stride = RAW10_STRIDE(host_mode.width);
++
++	for (uint32_t x = 0; x + 5 <= stride; x += 5) {
++		at[x] = at[x + 1] = at[x + 2] = at[x + 3] = 64 >> 2;
++		at[x + 4] = 0;
++	}
++	for (uint32_t y = 1; y < host_mode.height; y++) {
++		memcpy(at + (uint64_t)y * stride, at, stride);
++	}
++}
++
++/*
++ * The app's frame in slot s into place p: false if it is not a frame this can read, or the app wrote
++ * the slot meanwhile (torn).
++ */
++static bool
++host_fill(int p, uint32_t s, uint64_t seq, bool turned)
++{
++	volatile struct sccam_header *h = sccam;
++	volatile struct sccam_slot *sl = &h->slot[s];
++	uint32_t sw = sl->width, sh = sl->height, format = sl->format, ys = sl->stride_y, uvs = sl->stride_uv;
++	uint64_t offset = sl->offset, uv_offset = sl->uv_offset, bytes = sl->bytes;
++	uint32_t w = host_width, hh = host_height, cw, ch, cx, cy, stride = RAW10_STRIDE(host_mode.width);
++	uint8_t *out = (uint8_t *)(ring + (uint64_t)p * ring_place_bytes);
++	const uint8_t *base = (const uint8_t *)(uintptr_t)h;   /* (the pixels: plain reads between the barriers) */
++
++	if ((format != SCCAM_FOURCC_NV12 && format != SCCAM_FOURCC_NV21) || sw < 2 || sh < 2 || sw > 8192 || sh > 8192 ||
++	    (sw & 1) != 0 || (sh & 1) != 0 || offset < sccam->header_bytes ||
++	    ys < sw || uvs < (sw & ~1u) || offset + bytes > host_size || uv_offset + (uint64_t)uvs * (sh / 2) > bytes ||
++	    (uint64_t)ys * sh > uv_offset) {
++		return false;
++	}
++	/* the middle part of the app's frame with the pictures' shape */
++	if ((uint64_t)sw * hh > (uint64_t)sh * w) {
++		ch = sh;
++		cw = (uint32_t)((uint64_t)sh * w / hh);
++	} else {
++		cw = sw;
++		ch = (uint32_t)((uint64_t)sw * hh / w);
++	}
++	cx = (sw - cw) / 2;
++	cy = (sh - ch) / 2;
++	for (uint32_t x = 0; x < w; x++) {
++		uint32_t src = cx + (uint32_t)((uint64_t)x * cw / w);
++
++		host_xmap[turned ? w - 1 - x : x] = (uint16_t)(src < sw ? src : sw - 1);
++	}
++	const uint8_t *yp = base + offset, *uvp = base + offset + uv_offset;
++	int ui = format == SCCAM_FOURCC_NV12 ? 0 : 1, vi = 1 - ui;
++
++	for (uint32_t y = 0; y < hh; y++) {
++		uint32_t sy = cy + (uint32_t)((uint64_t)(turned ? hh - 1 - y : y) * ch / hh);
++		const uint8_t *yr = yp + (uint64_t)sy * ys, *uvr = uvp + (uint64_t)(sy / 2) * uvs;
++		uint8_t *a = out + (uint64_t)(2 * y) * stride, *b = a + stride;
++
++		for (uint32_t x = 0; x < w; x += 2, a += 5, b += 5) {
++			uint32_t x0 = host_xmap[x], x1 = host_xmap[x + 1], xc = (x0 + x1) / 2 & ~1u;
++
++			host_pair(a, b, yr[x0], yr[x1], (int)uvr[xc + (uint32_t)ui] - 128, (int)uvr[xc + (uint32_t)vi] - 128);
++		}
++	}
++	host_barrier();
++	return sl->seq == seq;
++}
++
++/* a session of the app's frames: ios_session()'s, with the app's camera for the sensor */
++static void
++host_session(void)
++{
++	volatile struct sccam_header *h = sccam;
++	uint32_t lines, gain, frame_lines;
++	uint64_t last_seq = 0, last_frame = ios_ms(), torn = 0, refused = 0, black = 0, host_frames = 0;
++	bool turned = (host_turn & (hw_index == 2 ? 2u : 1u)) != 0, said_host = false, said_wait = false;
++
++	ios_frames_done = ios_given = ios_writes_late = 0;
++	host_level_light = 0;
++	if (!ring_alloc(RAW10_STRIDE(host_mode.width) * host_mode.height)) {
++		return;
++	}
++	lck_mtx_lock(&ios_lock);
++	for (int i = 0; i < RING; i++) {
++		place[i].state = PLACE_FREE;
++		place[i].sequence = 0;
++	}
++	lines = ios_ask.lines;
++	gain = ios_ask.gain;
++	frame_lines = ios_ask.frame_lines;
++	ios_ask.pending = false;
++	exposure_limits(&lines, &gain, &frame_lines);
++	ios_now.lines = lines;
++	ios_now.gain = gain;
++	ios_now.frame_lines = frame_lines;
++	ios_streaming = true;
++	ios_last_read = ios_ms();
++	lck_mtx_unlock(&ios_lock);
++	host_request(true, hw_index);
++	say("camera: the frames for iOS: the app's %s camera, %ux%u (as RAW10 %ux%u)\n", hw_index == 2 ? "front" : "back", host_width,
++	    host_height, host_mode.width, host_mode.height);
++	while (ios_open && ios_switch_to == 0) {
++		int p = -1;
++		uint64_t now, ns;
++
++		wait_ms(4);
++		now = ios_ms();
++		lck_mtx_lock(&ios_lock);
++		if (now - ios_last_read > IDLE_MS) {
++			lck_mtx_unlock(&ios_lock);
++			break;
++		}
++		if (ios_ask.pending) {
++			lines = ios_ask.lines;
++			gain = ios_ask.gain;
++			frame_lines = ios_ask.frame_lines;
++			ios_ask.pending = false;
++			exposure_limits(&lines, &gain, &frame_lines);
++			ios_now.lines = lines;
++			ios_now.gain = gain;
++			ios_now.frame_lines = frame_lines;
++		}
++		lck_mtx_unlock(&ios_lock);
++		absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++		h->guest_ns = ns;
++		host_barrier();
++		uint64_t seq = h->frame_seq;
++		uint32_t s = h->latest;
++		host_barrier();
++		bool fresh = seq != last_seq && seq != 0 && s < h->nslots && (h->host_flags & SCCAM_HOST_READY) != 0;
++
++		if (fresh && !said_host) {
++			said_host = true;
++			say("camera: the app's frames: %ux%u, format %#x, facing %u\n", h->slot[s].width, h->slot[s].height,
++			    h->slot[s].format, h->slot[s].facing);
++		}
++		/* (a pause of the app's frames, as a camera changes, is waited out a second before black ones) */
++		if (!fresh && now - last_frame < (host_frames != 0 ? 1000u : 200u)) {
++			continue;
++		}
++		if (!fresh && !said_wait && now - last_frame > 3000) {
++			said_wait = true;
++			say("camera: no frames from the app for 3 s (flags %#x, state %u, error %u): black ones meanwhile\n",
++			    h->host_flags, h->host_state, h->host_error);
++		}
++		lck_mtx_lock(&ios_lock);
++		for (int i = 0; i < RING; i++) {
++			if (place[i].state != PLACE_READING && (p < 0 || place[i].sequence < place[p].sequence)) {
++				p = i;
++			}
++		}
++		if (p >= 0) {
++			place[p].state = PLACE_WRITING;
++		}
++		lck_mtx_unlock(&ios_lock);
++		if (p < 0) {
++			ios_writes_late++;
++			continue;
++		}
++		host_levels((uint64_t)ios_now.lines * ios_now.gain / GAIN_UNITY);
++		bool ok = false;
++
++		if (fresh) {
++			uint64_t slot_seq = h->slot[s].seq;
++
++			host_barrier();
++			last_seq = seq;
++			if ((slot_seq & 1) == 0 && slot_seq != 0) {
++				h->guest_reading = s + 1;
++				host_barrier();
++				ok = host_fill(p, s, slot_seq, turned);
++				h->guest_reading = 0;
++				if (ok) {
++					host_frames++;
++				} else if (h->slot[s].seq != slot_seq) {
++					torn++;
++				} else {
++					refused++;
++				}
++			} else {
++				torn++;
++			}
++			if (!ok) {
++				lck_mtx_lock(&ios_lock);
++				place[p].state = PLACE_FREE;
++				lck_mtx_unlock(&ios_lock);
++				continue;
++			}
++		} else {
++			host_black(p);
++			black++;
++		}
++		last_frame = now;
++		lck_mtx_lock(&ios_lock);
++		place[p].state = PLACE_READY;
++		place[p].sequence = ++ios_frames_done;
++		place[p].time = mach_absolute_time();
++		place[p].exposure_lines = ios_now.lines;
++		place[p].gain = ios_now.gain;
++		place[p].frame_lines = ios_now.frame_lines;
++		lck_mtx_unlock(&ios_lock);
++		wakeup(&ios_frames_done);
++	}
++	host_request(false, hw_index);
++	lck_mtx_lock(&ios_lock);
++	ios_streaming = false;
++	for (int i = 0; i < RING; i++) {
++		place[i].state = PLACE_FREE;
++	}
++	lck_mtx_unlock(&ios_lock);
++	wakeup(&ios_frames_done);
++	ring_free();
++	say("camera: the frames for iOS stopped (%s): %llu done (%llu of the app's, %llu black), %llu given, %llu torn, %llu refused\n",
++	    !ios_open ? "closed" : ios_switch_to != 0 ? "another sensor asked for" : "nobody reads", ios_frames_done, host_frames, black,
++	    ios_given, torn, refused);
++}
++
++/* the sensor `index' for host_session(): its descriptor (gain steps), the pictures' size as its mode */
++static bool
++host_select(unsigned index)
++{
++	select_sensor(index);
++	bzero(&host_mode, sizeof(host_mode));
++	host_mode.width = 2 * host_width;
++	host_mode.height = 2 * host_height;
++	host_mode.lanes = 1;
++	host_mode.frame_length = 2 * host_height + 64;
++	host_mode.fps_milli = 30000;
++	host_mode.data_type = RAW10_DT;
++	ios_mode_n = 0;
++	ios_mode = &host_mode;
++	ios_line_ns = (uint32_t)(1000000000000ull / ((uint64_t)host_mode.fps_milli * host_mode.frame_length));
++	ios_source = SOURCE_SENSOR;
++	ios_ask.lines = host_mode.frame_length - EXPOSURE_MARGIN;
++	ios_ask.gain = 8 * GAIN_UNITY;
++	ios_ask.frame_lines = 0;
++	say("camera: /dev/redwood-camera: the app's %s camera (as the %s), %ux%u, whenever it is read\n", index == 2 ? "front" : "back",
++	    hw->name, host_mode.width, host_mode.height);
++	return true;
++}
++
+ static const char *
+ ios_res(void)
+ {
+@@ -3851,7 +4269,7 @@ camdev_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
+ 	f.height = ios_mode->height;
+ 	f.stride = RAW10_STRIDE(ios_mode->width);
+ 	f.format = 1;
+-	f.bayer = ios_source == SOURCE_CSID_TPG ? 0 : ios_source == SOURCE_SENSOR_PATTERN ? hw->pattern_bayer : hw->bayer;
++	f.bayer = host || ios_source == SOURCE_CSID_TPG ? 0 : ios_source == SOURCE_SENSOR_PATTERN ? hw->pattern_bayer : hw->bayer;
+ 	f.black = 64;
+ 	f.sequence = place[b].sequence;
+ 	f.time = place[b].time;
+@@ -4009,6 +4427,9 @@ camdev_make(void)
+ static bool
+ ios_select(unsigned index, uint32_t mode_n)
+ {
++	if (host) {
++		return host_select(index);
++	}
+ 	select_sensor(index);
+ 	if (!fake) {
+ 		find_pins();
+@@ -4097,7 +4518,9 @@ serve_ios(void)
+ 		lck_mtx_lock(&ios_lock);
+ 		ios_wanted = false;
+ 		lck_mtx_unlock(&ios_lock);
+-		if (fake) {
++		if (host) {
++			host_session();
++		} else if (fake) {
+ 			fake_session();
+ 		} else {
+ 			ios_session();
+@@ -4171,9 +4594,13 @@ camera_thread(__unused void *parameter, __unused wait_result_t result)
+ 			}
+ 		}
+ 	}
+-	if (fake) {
+-		say("camera: cam=5 cam_fake=1: the %s camera's frames for iOS are a chart made here; nothing of the phone is touched\n",
+-		    hw->name);
++	if (fake || host) {
++		if (host) {
++			say("camera: sccam: the frames for iOS are the app's camera's (the phone the VM runs on); no camera hardware is touched\n");
++		} else {
++			say("camera: cam=5 cam_fake=1: the %s camera's frames for iOS are a chart made here; nothing of the phone is touched\n",
++			    hw->name);
++		}
+ 		serve_ios();
+ 		say("camera: done\n");
+ 		thread_terminate(current_thread());
+@@ -4220,14 +4647,18 @@ redwood_camera_init(void)
+ {
+ 	thread_t thread;
+ 
+-	if (!PE_parse_boot_argn("cam", &level, sizeof(level)) || level == 0) {
++	/* sccam.addr=: the app's camera (above), whatever cam= says */
++	if (PE_parse_boot_argn("sccam.addr", &host_pa, sizeof(host_pa)) && host_pa != 0 && host_attach()) {
++		host = true;
++		level = 5;
++	} else if (!PE_parse_boot_argn("cam", &level, sizeof(level)) || level == 0) {
+ 		return;
+ 	}
+ 	level = level > 5 ? 5 : level;
+ 	uint32_t fake_n = 0;
+ 
+-	fake = level == 5 && PE_parse_boot_argn("cam_fake", &fake_n, sizeof(fake_n)) && fake_n != 0;
+-	if (level >= 3) {
++	fake = !host && level == 5 && PE_parse_boot_argn("cam_fake", &fake_n, sizeof(fake_n)) && fake_n != 0;
++	if (level >= 3 && !host) {
+ 		/*
+ 		 * Memory in one piece for the host (cam_keep_mb, default 24: a 12-megapixel NV12 picture of cam=5,
+ 		 * or two frames of cam=3 and cam=4 up to 12 MB each), taken now, while the system's memory still

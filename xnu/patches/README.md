@@ -9,6 +9,7 @@ separate tracks from conflicting in the one big patch:
 | 1100-1199 | virtio-pci transport and drivers |
 | 1200-1299 | display and input |
 | 1300-1399 | GPU 3D: virtio-gpu 3D / gfxstream (`bsd/dev/redwood_vgpu3d*.c`) |
+| 1400-1499 | camera: the host phone's camera under AVF (`bsd/dev/redwood_camera.c`, `avf/CAMERA.md`) |
 
 Make one with `git diff` in the kernel tree against the state after `apply.sh`, and mind that
 `xnu/export.sh` folds everything in the tree into `redwood.patch`: export from a tree without
