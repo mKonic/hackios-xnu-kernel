@@ -79,15 +79,42 @@ the injection library's intended path in QEMU, not a fault.
 
 ## Why the home screen and not the lock screen
 
-iOS 16 draws the lock screen through `com.apple.posterboardservices`, and nothing on this
-volume registers that Mach service: `PosterBoard.app` and `PosterBoard*.framework` are there,
-but there is no launchd job for them (checked both ways -- `System/Library/LaunchDaemons`
-and the job list in `root.apfs`). SpringBoard's lookup fails, it does not enter the lock-screen
-state, and it goes straight to the home screen.
+iOS 16 draws the lock screen through `com.apple.posterboardservices`. Its publisher is
+`com.apple.PosterBoard` -- and that is not a LaunchDaemon but a **LaunchAngel**.
 
-Adding `com.apple.chronod` -- which does exist, and does serve `com.apple.chronoservices` --
-makes chronod run (`All life begins with Nu and ends with Nub`) and the widget machinery start,
-including a `LockScreenPeopleWidget`, but `posterboardservices` is still absent and the result is
-the same home screen. Getting a real lock screen therefore needs the posterboard daemon to be
-available, which is a job-list question and not a QEMU one. Note that the home screen is the
-*stronger* result: it means SpringBoard, icon services, the icon layout and the dock all work.
+`build.sh` deletes `System/Library/LaunchAngels` and points `LaunchDaemons` at our own directory,
+so all twelve angels are off the volume launchd reads. Naming one in `IOS_JOBS` used to fail
+outright, because `mkjobs.py` only ever opened `LaunchDaemons/<label>.plist`. It now falls back to
+`LaunchAngels/<label>.plist` for a label that is named explicitly -- an angel is still only ever
+run when something asks for one of its Mach services, which is what naming it is for.
+
+With `com.apple.PosterBoard` named:
+
+* `Successfully spawned PosterBoard[38] because launch job`, and it goes on to start
+  `com.apple.WallpaperKit.CollectionsPoster` (397 lines of wallpaper machinery);
+* the `failed lookup: name = com.apple.posterboardservices` warnings (3 of them) drop to **0**;
+* nothing regresses -- 662 containers, 17 swaps, and the home screen is still drawn.
+
+The screen is still the home screen, so resolving the service was necessary but not sufficient:
+SpringBoard does not enter the lock-screen state on this boot. The next thing to look at is what
+else the lock screen needs before `SBLockScreenManager` commits to it.
+
+The twelve angels, and what each draws a part of, so the next person knows what is missing:
+
+| angel | what it is |
+|---|---|
+| `com.apple.PosterBoard` | the lock screen / posters (`posterboardservices`) |
+| `com.apple.PaperBoard` | the wallpaper |
+| `com.apple.InputUI` | the keyboard |
+| `com.apple.MediaRemoteUI` | the now-playing controls |
+| `com.apple.ClockAngel` | the clock |
+| `com.apple.AccessibilityUIServer` | accessibility overlay |
+| `com.apple.UIKit.OverlayUI` | UIKit overlay windows |
+| `com.apple.PassbookUISceneService` | Wallet scenes |
+| `com.apple.ShortcutsUI` | Shortcuts scenes |
+| `com.apple.livetranscriptionui` | live transcription |
+| `com.apple.replaykitangel` | ReplayKit |
+| `com.apple.sharing.airdropui` | AirDrop UI |
+
+Note also that the home screen is the *stronger* result than the lock screen: it means
+SpringBoard, icon services, the icon layout and the dock all work.
