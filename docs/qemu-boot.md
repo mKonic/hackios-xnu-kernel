@@ -68,4 +68,26 @@ screenshot -- never by one counter sitting still.
 
 A run that worked, in order: `display 1125 x 2436` -> `platform qemu-virt` -> kernel ->
 launchd -> `Presenting overlay: BKDisplayRenderOverlayAppleLogo` -> 662 containers ->
-SpringBoard `[homescreen]` -> `swap 1..17` -> the home screen, drawn.
+SpringBoard `[homescreen]` -> `swap 1..17` -> the home screen, drawn:
+
+![the home screen under QEMU](qemu-homescreen.png)
+
+Status bar, both widgets, every icon drawn from its real asset, the dock, the search pill.
+The two widgets are white because their contents are drawn by a GPU extension and this is the
+software renderer -- `redwood: no accelerated renderer; the software one will draw`, which is
+the injection library's intended path in QEMU, not a fault.
+
+## Why the home screen and not the lock screen
+
+iOS 16 draws the lock screen through `com.apple.posterboardservices`, and nothing on this
+volume registers that Mach service: `PosterBoard.app` and `PosterBoard*.framework` are there,
+but there is no launchd job for them (checked both ways -- `System/Library/LaunchDaemons`
+and the job list in `root.apfs`). SpringBoard's lookup fails, it does not enter the lock-screen
+state, and it goes straight to the home screen.
+
+Adding `com.apple.chronod` -- which does exist, and does serve `com.apple.chronoservices` --
+makes chronod run (`All life begins with Nu and ends with Nub`) and the widget machinery start,
+including a `LockScreenPeopleWidget`, but `posterboardservices` is still absent and the result is
+the same home screen. Getting a real lock screen therefore needs the posterboard daemon to be
+available, which is a job-list question and not a QEMU one. Note that the home screen is the
+*stronger* result: it means SpringBoard, icon services, the icon layout and the dock all work.
