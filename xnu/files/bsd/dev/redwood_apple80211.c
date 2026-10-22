@@ -436,10 +436,18 @@ get(struct apple80211req *request)
 	case 103:                               /* all of it, as a scan's result */
 		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give_network(request, &state->bss);
 		break;
-	case 2: {                               /* how it was joined: open system, then WPA2 with a passphrase */
-		struct {
+	case 2: {                               /* how it was joined: open system, then WPA2 with a passphrase -- or */
+		struct {                        /* nothing more, for a network whose beacon has no RSN element (48) */
 			uint32_t version, lower, upper, extended;
 		} answer = { .version = 1, .lower = 1, .upper = 8 };
+		bool secured = false;
+
+		for (unsigned at = 0; at + 2 <= state->bss.elements_length; at += 2 + state->bss.elements[at + 1]) {
+			secured |= state->bss.elements[at] == 48;
+		}
+		if (!secured && state->bss.elements_length != 0) {
+			answer.upper = 0;
+		}
 
 		error = state->phase != REDWOOD_STA_JOINED ? ENXIO : give(request, &answer, sizeof(answer));
 		break;
