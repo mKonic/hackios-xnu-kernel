@@ -72,7 +72,12 @@ common/build.sh qemu-virt     # builds the APFS images (and the kernel, if the t
 common/run.sh qemu-virt       # a 20-minute session in a QEMU window
 ```
 
-The lock screen appears after 2–3 minutes.
+On a machine with KVM the lock screen appears after 2–3 minutes. Under pure TCG it does not: the
+first boot spends about 16 of those 20 minutes in `lsd` creating a container per application, and
+the home screen is drawn at the end of the session rather than the lock screen -- see
+[docs/qemu-boot.md](docs/qemu-boot.md) for the measured timeline, and for the two bugs (a
+`volatile` missing from the ramfb request, SpringBoard's log being off by default) that make a
+working boot look like a dead display.
 
 - **Mouse with the left button held = finger.** Unlock / leave an app: swipe up from the very bottom edge; back:
   swipe from the left edge.
@@ -184,7 +189,7 @@ kernel (driver replacements) or by a library the kernel injects with `DYLD_INSER
 | `qemu/` | QEMU runs, touch input, screenshots, stack symbolication |
 | `tools/` | recording (`recording.py`, `sound.py`), UFS/flash tools, `mk-ath11k.sh`, `new-workspace.sh`, host tests |
 | `prebuilt/` | built kernel, loader and UEFI pieces (`NOTICES.md` for the third-party code in the kernel) |
-| `docs/` | screenshots, [checks.md](docs/checks.md), [PORTING.md](docs/PORTING.md) |
+| `docs/` | screenshots, [checks.md](docs/checks.md), [PORTING.md](docs/PORTING.md), [qemu-boot.md](docs/qemu-boot.md) |
 
 ## Debugging
 
