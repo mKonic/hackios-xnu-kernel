@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""tap.py X Y (pixels of the 1125x2436 framebuffer): a one-finger tap on QEMU's virtio multitouch, over QMP 4455."""
-import json, socket, sys, time
+"""tap.py X Y (pixels of the 1125x2436 framebuffer): a one-finger tap on QEMU's virtio multitouch, over QMP (env QMP, default 4455)."""
+import json, os, socket, sys, time
 x, y = int(sys.argv[1]), int(sys.argv[2])
-s = socket.create_connection(("127.0.0.1", 4455)); f = s.makefile("rw")
+s = socket.create_connection(("127.0.0.1", int(os.environ.get("QMP", "4455")))); f = s.makefile("rw")
 f.readline(); f.write(json.dumps({"execute": "qmp_capabilities"}) + "\n"); f.flush(); f.readline()
 def send(events):
     f.write(json.dumps({"execute": "input-send-event", "arguments": {"events": events}}) + "\n"); f.flush(); print(f.readline().strip())

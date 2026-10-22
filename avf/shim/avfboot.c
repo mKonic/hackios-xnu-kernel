@@ -200,7 +200,7 @@ static struct { uint64_t pa, size; uint32_t w, h; } scfb;
  * how MobileGestalt (and so SpringBoard's Camera.app) finds one: as xnuloader's cam=5.
  */
 #define SCCAM_MAGIC	0x4d434353u	/* "SCCM": the app writes the header before boot */
-static struct { uint64_t pa, size; } sccam;
+static struct { uint64_t pa, size; int ok; } sccam;
 
 /* ---- the machine, from the FDT ---- */
 
@@ -693,8 +693,10 @@ void avfboot_main(uint64_t fdt_pa)
 	if (sccam.pa || sccam.size) {
 		if (sccam.pa < m.ram_lo || sccam.pa + sccam.size > m.ram_hi || (sccam.pa & 0xfff) || sccam.size < 0x10000)
 			die("sccam.addr/size do not describe a region in RAM");
-		if (*(volatile uint32_t *)sccam.pa != SCCAM_MAGIC)
-			uart_puts("avfboot: sccam: no header from the app (the kernel will not use it)\n");
+		/* (no header: the app's region was refused and this is plain RAM; no camera then) */
+		sccam.ok = *(volatile uint32_t *)sccam.pa == SCCAM_MAGIC;
+		if (!sccam.ok)
+			uart_puts("avfboot: sccam: no header from the app: no camera\n");
 		if (sccam.pa < win_end)
 			win_end = sccam.pa & ~(BASE_ALIGN - 1);
 		uart_kv("avfboot: sccam ", sccam.pa);
@@ -912,7 +914,7 @@ void avfboot_main(uint64_t fdt_pa)
 	dt_begin(&w, "haptics");
 	dt_identity(&w, identity_haptics, sizeof(identity_haptics) / sizeof(identity_haptics[0]), identity_haptics_data);
 	dt_end(&w);
-	if (sccam.pa) {
+	if (sccam.ok) {
 		dt_begin(&w, "camera");	/* (MobileGestalt's video-camera) */
 		dt_end(&w);
 	}
@@ -970,7 +972,7 @@ void avfboot_main(uint64_t fdt_pa)
 		dt_prop_u32(&w, "boot-console", 1);
 		dt_end(&w);
 	}
-	if (sccam.pa) {
+	if (sccam.ok) {
 		/* where MobileGestalt looks for the cameras: of the iPhone's ISP node, only the camera at the back (no driver matches it) */
 		dt_begin(&w, "isp");
 		dt_prop_u32(&w, "camera-rear", 1);
