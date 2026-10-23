@@ -109,6 +109,9 @@ fi
 # EMU_QMP=<socket>: shown by the emulator (qemu/emu.sh), which attaches as QEMU's D-Bus display over QMP
 EMU=()
 [ -n "$EMU_QMP" ] && EMU=(-display dbus,p2p=yes -qmp "unix:$EMU_QMP,server=on,wait=off")
+# launchd's own log off the console (kernel patch 1204): two thirds of a boot's console, each character a trapped
+# write to the UART here. QEMU_LAUNCHD_LOG=1 keeps it.
+[ "$QEMU_LAUNCHD_LOG" = 1 ] || CMDLINE="launchd_console=0 $CMDLINE"
 # the profile's four cores (common/devices/qemu-virt.conf); QEMU_SMP=1 for one
 export QEMU_SMP=${QEMU_SMP:-4}
 [[ " $CMDLINE " == *" cpus="* ]] || CMDLINE="cpus=$QEMU_SMP $CMDLINE"

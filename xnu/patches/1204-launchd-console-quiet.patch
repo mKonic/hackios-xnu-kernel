@@ -1,0 +1,48 @@
+diff --git a/bsd/dev/arm/cons.c b/bsd/dev/arm/cons.c
+--- a/bsd/dev/arm/cons.c
++++ b/bsd/dev/arm/cons.c
+@@ -19,6 +19,7 @@
+ #include <sys/tty.h>
+ #include <sys/proc.h>
+ #include <sys/uio.h>
++#include <pexpert/pexpert.h>
+ 
+ struct tty      *constty;               /* current console device */
+ 
+@@ -72,9 +73,36 @@
+ }
+ 
+ 
++/*
++ * Boot-arg launchd_console=0: what launchd writes to the console is dropped. It logs its own
++ * business there -- thousands of lines in a couple of minutes, two thirds of a boot's console -- and
++ * where the console is an emulated UART (QEMU) every character is a trapped write. Its daemons'
++ * output, and everything before init becomes launchd, still comes through.
++ */
++static int
++cn_launchd_quiet(void)
++{
++	static int quiet = -1;
++	uint32_t on = 1;
++	char name[MAXCOMLEN + 1];
++
++	if (quiet < 0) {
++		quiet = PE_parse_boot_argn("launchd_console", &on, sizeof(on)) && on == 0;
++	}
++	if (!quiet || proc_selfpid() != 1) {
++		return 0;
++	}
++	proc_selfname(name, sizeof(name));
++	return strncmp(name, "launchd", 7) == 0;
++}
++
+ int
+ cnwrite(__unused dev_t dev, struct uio *uio, int ioflag)
+ {
++	if (cn_launchd_quiet()) {
++		uio_update(uio, uio_resid(uio));
++		return 0;
++	}
+ 	dev = cndev();
+ 	return (*cdevsw[major(dev)].d_write)(dev, uio, ioflag);
+ }
