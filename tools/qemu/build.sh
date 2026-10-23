@@ -1,9 +1,9 @@
 #!/bin/bash
 # QEMU for HackiOS: the release the distribution ships (11.1.2) with tools/qemu/*.patch, for the aarch64
 # machine only, built into out/qemu. qemu/run.sh takes it from there when it is there.
-#   0001  rutabaga's scanout moves from one resource to the next without QEMU's "Display output is not
-#         active." placeholder in between, and a flush tells the display of the resource it shows only
-#         (the direct scanout of kernel patch 1303 flickered without it)
+#   0001  rutabaga keeps one picture per scanout: moving the scanout to another resource of its size only
+#         notes it, a flush of the shown resource reads into that picture (no placeholder, no frames
+#         dropped by the D-Bus display at every move: kernel patch 1303 moves it every frame)
 # Needs what the distribution's QEMU needs to build, with rutabaga-ffi (its gfxstream) and meson.
 set -e
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)

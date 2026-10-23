@@ -1,7 +1,7 @@
 diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
 --- a/bsd/dev/redwood_vgpu.c
 +++ b/bsd/dev/redwood_vgpu.c
-@@ -88,8 +88,13 @@
+@@ -88,8 +88,12 @@
  	uint64_t features;
  	uint8_t *cmd, *resp;                    /* device-visible bounce buffers */
  	uint64_t cmd_pa, resp_pa;
@@ -11,11 +11,10 @@ diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
  	/* the scanout */
  	bool shown;
 +	uint32_t scanout_res;                   /* the resource on scanout 0: ours, or a 3D one (redwood_vgpu_show) */
-+	uint32_t been_shown[8];                 /* 3D resources that have been on it (the host keeps a picture of each) */
  	void *fb;
  	uint64_t fb_pa;
  	uint32_t width, height, stride;
-@@ -121,7 +126,9 @@
+@@ -121,7 +125,9 @@
  	}
  	vg.cmd = vio_dma_alloc(REDWOOD_VGPU_CTRL_MAX, &vg.cmd_pa);
  	vg.resp = vio_dma_alloc(REDWOOD_VGPU_RESP_MAX, &vg.resp_pa);
@@ -26,7 +25,7 @@ diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
  		vio_fail(d);
  		return ENOMEM;
  	}
-@@ -136,6 +143,59 @@
+@@ -136,6 +142,59 @@
  	return 0;
  }
  
@@ -86,7 +85,7 @@ diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
  /* One command, waited for. Under vgpu_lock, device up. */
  static int
  vgpu_submit(const void *cmd, uint32_t cmd_len, void *resp, uint32_t resp_len)
-@@ -144,13 +204,16 @@
+@@ -144,13 +203,16 @@
  		{ vg.cmd_pa, cmd_len, false },
  		{ vg.resp_pa, resp_len, true },
  	};
@@ -105,7 +104,7 @@ diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
  	memcpy(vg.cmd, cmd, cmd_len);
  	bzero(vg.resp, resp_len);
  	seq = vio_intr_seq(vg.dev);
-@@ -158,35 +221,42 @@
+@@ -158,35 +220,42 @@
  		return EIO;
  	}
  	vio_queue_kick(vg.ctrlq);
@@ -172,7 +171,7 @@ diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
  /* A command whose answer is just "OK". */
  static int
  vgpu_simple(void *cmd, uint32_t len, uint32_t type)
-@@ -281,6 +351,7 @@
+@@ -281,6 +350,7 @@
  		goto out;
  	}
  	vg.shown = true;
@@ -180,7 +179,7 @@ diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
  	printf("virtio-gpu: scanout 0 is %ux%u at 0x%llx\n", w, h, vg.fb_pa);
  	error = 0;
  out:
-@@ -303,6 +374,14 @@
+@@ -303,6 +373,14 @@
  	int error = ENODEV;
  
  	lck_mtx_lock(&vgpu_lock);
@@ -195,50 +194,32 @@ diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
  	if (vg.shown) {
  		transfer.r = (struct rect){ x, y, width, height };
  		transfer.offset = (uint64_t)y * vg.stride + (uint64_t)x * 4;
-@@ -320,6 +399,62 @@
+@@ -320,6 +398,44 @@
  	return error;
  }
  
 +/*
-+ * QEMU sends the display a resource's picture the moment it goes on the scanout, and a flush brings
-+ * that picture up to date. A frame here is the other of the two buffers CoreAnimation draws in
-+ * turn: put on first, it would show the frame before last until the flush -- a flicker on every
-+ * frame that moves. So a buffer that has been on the scanout before (its picture exists on the host)
-+ * is flushed first and then put on: what goes out is the new frame. The first time, it is the
-+ * other way round (a flush needs the picture), once.
++ * Put a 3D resource on the scanout, if it is not there, and flush it: the display shows the frame.
++ * (QEMU's rutabaga as tools/qemu/build.sh patches it keeps one picture per scanout and reads the
++ * flushed resource into it, so moving between CoreAnimation's two buffers every frame is cheap and
++ * shows nothing in between.) The flush is posted, not waited for.
 + */
 +int
 +redwood_vgpu_show(uint32_t resource, uint32_t width, uint32_t height)
 +{
 +	struct resource_flush flush = { .r = { 0, 0, width, height }, .resource_id = resource, .padding = 0 };
 +	struct set_scanout scanout = { .r = { 0, 0, width, height }, .scanout_id = 0, .resource_id = resource };
-+	bool known = false;
 +	int error = ENODEV;
 +
 +	lck_mtx_lock(&vgpu_lock);
 +	if (vg.shown && width == vg.width && height == vg.height) {
-+		for (int i = 0; i < 8; i++) {
-+			known |= vg.been_shown[i] == resource;
-+		}
-+		if (vg.scanout_res == resource) {
-+			error = vgpu_post(&flush, sizeof(flush), CMD_RESOURCE_FLUSH);
-+		} else if (known) {
-+			error = vgpu_simple(&flush, sizeof(flush), CMD_RESOURCE_FLUSH);
-+			if (error == 0) {
-+				error = vgpu_post(&scanout, sizeof(scanout), CMD_SET_SCANOUT);
-+			}
-+		} else {
++		error = 0;
++		if (vg.scanout_res != resource) {
 +			error = vgpu_simple(&scanout, sizeof(scanout), CMD_SET_SCANOUT);
-+			if (error == 0) {
-+				error = vgpu_simple(&flush, sizeof(flush), CMD_RESOURCE_FLUSH);
-+			}
-+			if (error == 0) {
-+				memmove(&vg.been_shown[1], &vg.been_shown[0], 7 * sizeof(vg.been_shown[0]));
-+				vg.been_shown[0] = resource;
-+			}
++			vg.scanout_res = error == 0 ? resource : vg.scanout_res;
 +		}
 +		if (error == 0) {
-+			vg.scanout_res = resource;
++			error = vgpu_post(&flush, sizeof(flush), CMD_RESOURCE_FLUSH);
 +		}
 +	}
 +	lck_mtx_unlock(&vgpu_lock);
@@ -249,8 +230,8 @@ diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
 +redwood_vgpu_forget(uint32_t resource)
 +{
 +	lck_mtx_lock(&vgpu_lock);
-+	for (int i = 0; i < 8; i++) {
-+		vg.been_shown[i] = vg.been_shown[i] == resource ? 0 : vg.been_shown[i];
++	if (vg.scanout_res == resource) {
++		vg.scanout_res = 0;     /* (the next frame puts something on again) */
 +	}
 +	lck_mtx_unlock(&vgpu_lock);
 +}
@@ -258,7 +239,7 @@ diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
  #else /* no virtio core in this kernel */
  
  int
-@@ -335,6 +470,17 @@
+@@ -335,6 +451,17 @@
  }
  
  int

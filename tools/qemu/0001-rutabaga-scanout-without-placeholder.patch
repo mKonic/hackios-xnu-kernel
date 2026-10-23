@@ -1,25 +1,33 @@
---- a/hw/display/virtio-gpu-rutabaga.c	2026-10-23 16:41:04.836448926 +0300
-+++ b/hw/display/virtio-gpu-rutabaga.c	2026-10-23 16:41:04.856449385 +0300
+--- a/hw/display/virtio-gpu-rutabaga.c
++++ b/hw/display/virtio-gpu-rutabaga.c
 @@ -265,7 +265,12 @@
          }
      }
  
 -    if (!found) {
 +    /*
-+     * HackiOS: a resource that has never been on a scanout has no picture to read into; one that is
-+     * not on it now is read all the same (it goes on next, with its new frame: see set_scanout) but
-+     * the display is only told about the one it shows, and only of the flushed rectangle.
++     * HackiOS: only the resource the scanout shows is read, and into the scanout's own picture (see
++     * set_scanout: the guest shows its frames in turn from two resources, and the scanout keeps one
++     * picture); the display is told of the flushed rectangle.
 +     */
-+    if (!found || !res->image) {
++    if (!found || !scanout->ds || scanout->resource_id != rf.resource_id) {
          return;
      }
  
-@@ -283,7 +288,11 @@
+@@ -276,14 +281,18 @@
+     transfer.h = res->height;
+     transfer.d = 1;
+ 
+-    transfer_iovec.iov_base = pixman_image_get_data(res->image);
++    transfer_iovec.iov_base = pixman_image_get_data(scanout->ds->image);
+     transfer_iovec.iov_len = res->width * res->height * 4;
+ 
+     result = rutabaga_resource_transfer_read(vr->rutabaga, 0,
                                               rf.resource_id, &transfer,
                                               &transfer_iovec);
      CHECK(!result, cmd);
 -    qemu_console_update_full(scanout->con);
-+    if (scanout->resource_id == rf.resource_id) {
++    {
 +        uint32_t x = MIN(rf.r.x, res->width), y = MIN(rf.r.y, res->height);
 +        qemu_console_update(scanout->con, x, y, MIN(rf.r.width, res->width - x),
 +                            MIN(rf.r.height, res->height - y));
@@ -27,7 +35,28 @@
  }
  
  static void
-@@ -336,10 +345,14 @@
+@@ -321,6 +330,20 @@
+         return;
+     }
+ 
++    /*
++     * HackiOS: a resource of the picture's size and format the scanout already has only takes its
++     * place; its frames are read into that picture when flushed. A new surface at every move made
++     * QEMU's D-Bus display drop the frames it had not sent yet -- all of them, at one move a frame.
++     */
++    if (scanout->ds && surface_width(scanout->ds) == res->width &&
++        surface_height(scanout->ds) == res->height &&
++        surface_format(scanout->ds) == virtio_gpu_get_pixman_format(res->format)) {
++        scanout->resource_id = ss.resource_id;
++        res->scanout_bitmask = ss.scanout_id;
++        vb->enable = 1;
++        return;
++    }
++
+     if (!res->image) {
+         pixman_format_code_t pformat;
+         pformat = virtio_gpu_get_pixman_format(res->format);
+@@ -336,10 +359,14 @@
  
      vb->enable = 1;
  
