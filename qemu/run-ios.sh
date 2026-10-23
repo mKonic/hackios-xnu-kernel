@@ -90,6 +90,15 @@ if [ -n "$QEMU_VAR" ] && [ "$QEMU_VAR" != 0 ]; then
 	VAR=(-drive "file=$VAR_IMG,format=raw,if=none,id=var" -device virtio-blk-device,drive=var)
 	CMDLINE="var_store=1 virtio_blk=1 virtio_blk_rw=1 ${QEMU_VAR_SAVE_AFTER:+var_save_after=$QEMU_VAR_SAVE_AFTER }$CMDLINE"
 fi
+# QEMU_GPU=1: the display is a virtio GPU with gfxstream behind it (QEMU's rutabaga device) instead of
+# ramfb: the kernel's virtio-gpu takes the scanout, and /dev/vgpu3d's OpenGL ES runs on this machine's GPU.
+# NVIDIA's EGL opens no display while WAYLAND_DISPLAY names the session's compositor (and Mesa's software
+# renderer answers instead), so QEMU runs without it: show it with qemu/emu.sh, not -display gtk.
+GPU=(-device ramfb)
+if [ -n "$QEMU_GPU" ] && [ "$QEMU_GPU" != 0 ]; then
+	GPU=(-device virtio-gpu-rutabaga-device,x-gfxstream-gles=on,hostmem=256M,xres=1125,yres=2436)
+	unset WAYLAND_DISPLAY DISPLAY
+fi
 # EMU_QMP=<socket>: shown by the emulator (qemu/emu.sh), which attaches as QEMU's D-Bus display over QMP
 EMU=()
 [ -n "$EMU_QMP" ] && EMU=(-display dbus,p2p=yes -qmp "unix:$EMU_QMP,server=on,wait=off")
@@ -102,5 +111,5 @@ QEMU_MEM=${RAM_GB}G exec qemu/run.sh $((SECS + 40)) \
 	-object memory-backend-file,id=ram,size=$RAM_SIZE,mem-path="$PWD/qemu/ram.img",share=off \
 	-machine memory-backend=ram \
 	-global virtio-mmio.force-legacy=false -device virtio-tablet-device -device virtio-keyboard-device "${NET[@]}" "${SOUND[@]}" "${VAR[@]}" \
-	-device ramfb -monitor tcp:127.0.0.1:$((4444 + 10 * INSTANCE)),server,nowait \
+	"${GPU[@]}" -monitor tcp:127.0.0.1:$((4444 + 10 * INSTANCE)),server,nowait \
 	-qmp tcp:127.0.0.1:$((4445 + 10 * INSTANCE)),server,nowait "${EMU[@]}" "$@"
