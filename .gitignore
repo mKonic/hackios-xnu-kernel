@@ -40,6 +40,7 @@ __pycache__/
 /tools/jb-preinstall.py
 /tools/font_trim.py
 /tools/metallib.py
+/tools/gfxstream/
 
 /xnuloader/*
 !/xnuloader/build.sh
