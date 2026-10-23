@@ -130,6 +130,10 @@ EMU=()
 # launchd's own log off the console (kernel patch 1204): two thirds of a boot's console, each character a trapped
 # write to the UART here. QEMU_LAUNCHD_LOG=1 keeps it.
 [ "$QEMU_LAUNCHD_LOG" = 1 ] || CMDLINE="launchd_console=0 $CMDLINE"
+# Code at the same addresses every boot (the DEVELOPMENT kernel's -disable_aslr: the shared cache unslid, programs
+# at their own base): what QEMU translates, and what qemu/profile.py names, is the same from one boot to the
+# next. QEMU_ASLR=1 for the phone's randomised layout.
+[ "$QEMU_ASLR" = 1 ] || CMDLINE="-disable_aslr $CMDLINE"
 # the profile's four cores (common/devices/qemu-virt.conf); QEMU_SMP=1 for one
 export QEMU_SMP=${QEMU_SMP:-4}
 [[ " $CMDLINE " == *" cpus="* ]] || CMDLINE="cpus=$QEMU_SMP $CMDLINE"
