@@ -17,6 +17,10 @@ struct Scanout {
 	std::vector<uint8_t> pixels;
 	uint32_t width = 0, height = 0;
 	uint64_t serial = 0;  // bumps on every Scanout/Update: redraw when it changes
+	// The picture QEMU shares as memory (Listener.Unix.Map: ScanoutMap, then UpdateMap rectangles), if it does.
+	const uint8_t* map = nullptr;
+	size_t map_size = 0;
+	uint32_t map_stride = 0;
 	bool enabled = false;
 };
 
@@ -41,7 +45,7 @@ private:
 	std::string qmp_buf_;
 	GDBusConnection* display_ = nullptr;   // to QEMU's org.qemu.Display1 objects
 	GDBusConnection* listener_ = nullptr;  // QEMU calls our Listener on this one
-	unsigned listener_id_ = 0;
+	unsigned listener_id_ = 0, map_id_ = 0;
 	Scanout scanout_;
 };
 

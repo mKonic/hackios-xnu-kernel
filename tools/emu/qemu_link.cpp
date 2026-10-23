@@ -1,5 +1,8 @@
 #include "qemu_link.h"
 
+#include <sys/mman.h>
+#include <gio/gunixfdlist.h>
+
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
@@ -34,6 +37,29 @@ constexpr const char* kListenerXml = R"(<node>
   <property name="Interfaces" type="as" access="read"/>
  </interface>
 </node>)";
+
+// The picture as shared memory: QEMU hands its memfd over once and then says which rectangle changed, where the
+// base interface carries every frame's pixels over the socket (with the GPU's frames, 11 MB each, the guest
+// waiting). QEMU uses it when the Listener lists it in Interfaces and the picture is shareable (our QEMU's).
+constexpr const char* kMapXml = R"(<node>
+ <interface name="org.qemu.Display1.Listener.Unix.Map">
+  <method name="ScanoutMap"><arg type="h" direction="in"/><arg type="u" direction="in"/><arg type="u" direction="in"/><arg type="u" direction="in"/><arg type="u" direction="in"/><arg type="u" direction="in"/></method>
+  <method name="UpdateMap"><arg type="i" direction="in"/><arg type="i" direction="in"/><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
+ </interface>
+</node>)";
+
+void unmap(Scanout& s) {
+	if (s.map) munmap(const_cast<uint8_t*>(s.map), s.map_size);
+	s.map = nullptr, s.map_size = 0;
+}
+
+// Rows [y, y + h) x [x, x + w) of the shared picture into our packed copy.
+void copy_from_map(Scanout& s, uint32_t x, uint32_t y, uint32_t w, uint32_t h) {
+	if (!s.map || uint64_t(x) + w > s.width || uint64_t(y) + h > s.height) return;
+	for (uint32_t r = 0; r < h; ++r)
+		std::memcpy(&s.pixels[(size_t(y + r) * s.width + x) * 4], s.map + size_t(y + r) * s.map_stride + size_t(x) * 4,
+		            size_t(w) * 4);
+}
 
 GDBusConnection* peer(int fd, GDBusConnectionFlags extra, std::string* error) {
 	GError* err = nullptr;
@@ -71,7 +97,34 @@ struct ListenerCalls {
 			std::fprintf(stderr, "emu: listener %s%.120s\n", name, a);
 			g_free(a);
 		}
-		if (m == "Scanout" || m == "Update") {
+		if (m == "ScanoutMap") {
+			int32_t index;
+			uint32_t offset, w, h, stride, format;
+			g_variant_get(args, "(huuuuu)", &index, &offset, &w, &h, &stride, &format);
+			GUnixFDList* fds = g_dbus_message_get_unix_fd_list(g_dbus_method_invocation_get_message(inv));
+			int fd = fds ? g_unix_fd_list_get(fds, index, nullptr) : -1;
+			unmap(s);
+			if (fd >= 0) {
+				size_t size = size_t(offset) + size_t(stride) * h;
+				void* p = mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
+				close(fd);
+				if (p != MAP_FAILED) {
+					s.map = static_cast<const uint8_t*>(p) + offset, s.map_size = size, s.map_stride = stride;
+					s.width = w, s.height = h;
+					s.pixels.assign(size_t(w) * h * 4, 0);
+					copy_from_map(s, 0, 0, w, h);
+					s.enabled = true, ++s.serial;
+				}
+			}
+		} else if (m == "UpdateMap") {
+			int32_t x, y, w, h;
+			g_variant_get(args, "(iiii)", &x, &y, &w, &h);
+			if (x >= 0 && y >= 0 && w > 0 && h > 0) {
+				copy_from_map(s, uint32_t(x), uint32_t(y), uint32_t(w), uint32_t(h));
+				++s.serial;
+			}
+		} else if (m == "Scanout" || m == "Update") {
+			if (m == "Scanout") unmap(s);
 			int32_t x = 0, y = 0;
 			uint32_t w, h, stride, format;
 			GVariant* data;
@@ -99,13 +152,15 @@ struct ListenerCalls {
 				g_dbus_method_invocation_return_value(inv, nullptr);
 	}
 	static GVariant* property(GDBusConnection*, const char*, const char*, const char*, const char*, GError**, gpointer) {
-		const char* none[] = {nullptr};
-		return g_variant_new_strv(none, 0);
+		const char* interfaces[] = {"org.qemu.Display1.Listener.Unix.Map", nullptr};
+		return g_variant_new_strv(interfaces, 1);
 	}
 };
 
 QemuLink::~QemuLink() {
 	if (listener_ && listener_id_) g_dbus_connection_unregister_object(listener_, listener_id_);
+	if (listener_ && map_id_) g_dbus_connection_unregister_object(listener_, map_id_);
+	unmap(scanout_);
 	if (listener_) g_object_unref(listener_);
 	if (display_) g_object_unref(display_);
 	if (qmp_ >= 0) close(qmp_);
@@ -197,6 +252,12 @@ bool QemuLink::connect(const std::string& qmp_path, int timeout_ms, std::string*
 		*error = std::string("register Listener: ") + err->message;
 		g_error_free(err);
 		return false;
+	}
+	{
+		GDBusNodeInfo* map_node = g_dbus_node_info_new_for_xml(kMapXml, nullptr);
+		map_id_ = g_dbus_connection_register_object(listener_, "/org/qemu/Display1/Listener", map_node->interfaces[0], &vtable,
+		                                            this, nullptr, nullptr);
+		g_dbus_node_info_unref(map_node);
 	}
 	g_dbus_connection_start_message_processing(listener_);
 	return true;

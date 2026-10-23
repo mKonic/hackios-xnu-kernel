@@ -3,7 +3,8 @@
 # machine only, built into out/qemu. qemu/run.sh takes it from there when it is there.
 #   0001  rutabaga keeps one picture per scanout: moving the scanout to another resource of its size only
 #         notes it, a flush of the shown resource reads into that picture (no placeholder, no frames
-#         dropped by the D-Bus display at every move: kernel patch 1303 moves it every frame)
+#         dropped by the D-Bus display at every move: kernel patch 1303 moves it every frame); that
+#         picture is shareable memory, so the D-Bus display maps it to the skin instead of sending frames
 #   0002  helper_lookup_tb_ptr tries the jump cache with the state's fields, not a copy of the whole state
 #         (a store-forwarding stall on every lookup; iOS's indirect calls and returns make lookups common)
 #   0003  exit without the libraries' destructors (gfxstream's sync thread crashed in an unloading EGL at
