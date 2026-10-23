@@ -104,7 +104,12 @@ if [ -n "$QEMU_GPU" ] && [ "$QEMU_GPU" != 0 ]; then
 	# the distribution's rutabaga puts its "Display output is not active." placeholder up at every move of
 	# the scanout between CoreAnimation's two buffers, every frame
 	[ "$QEMU_GPU" = panel ] && GPU=(-device virtio-gpu-rutabaga-device,x-gfxstream-gles=on,hostmem=256M,xres=1125,yres=2436)
-	unset WAYLAND_DISPLAY DISPLAY
+	# QEMU_GPU_EGL=mesa: Mesa's EGL (llvmpipe) instead, which needs the session's display: for comparing
+	if [ "$QEMU_GPU_EGL" = mesa ]; then
+		export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json
+	else
+		unset WAYLAND_DISPLAY DISPLAY
+	fi
 fi
 # EMU_QMP=<socket>: shown by the emulator (qemu/emu.sh), which attaches as QEMU's D-Bus display over QMP
 EMU=()
