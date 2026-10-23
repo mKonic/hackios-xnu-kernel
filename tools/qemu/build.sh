@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # QEMU for HackiOS: the release the distribution ships (11.1.2) with tools/qemu/*.patch, for the aarch64
 # machine only, built into out/qemu. qemu/run.sh takes it from there when it is there.
 #   0001  rutabaga keeps one picture per scanout: moving the scanout to another resource of its size only

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # The AVF layout on QEMU virt, with the Scion shared framebuffer (SCFB) as the only display:
 # avfboot + an XNUP payload, SYSTEM (iOS's system.apfs) as a read-only virtio-blk-pci disk (md0=rvblk0),
 # virtio-multitouch-pci for touch, and an SCFB region 36 MB below the top of RAM, as the Scion app

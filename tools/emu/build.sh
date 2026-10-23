@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Build the emulator (emu.cpp): out/emu/emu, with its toolbar icons rasterised into out/emu/icons.
 # Needs: g++ (C++23), SDL3, GLES 3, glib/gio, zlib, rsvg-convert.
 set -euo pipefail

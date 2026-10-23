@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Build avfboot: out/Image, an arm64 Linux Image for crosvm (AVF) and QEMU -kernel.
 # Needs clang and ld.lld (any recent LLVM; Apple's clang works with Homebrew's lld).
 set -euo pipefail

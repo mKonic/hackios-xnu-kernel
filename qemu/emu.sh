@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # The system in a phone frame (tools/emu): run-ios.sh under the emulator instead of a bare QEMU window.
 # usage: emu.sh [seconds] [extra qemu args...]      (seconds: a time limit; 0, the default, runs until the window is closed)      (env as for run-ios.sh: CMDLINE, QEMU_NET, AUDIO...)
 # The mouse with the left button held is a finger; the toolbar has power, volume, home and screenshot.

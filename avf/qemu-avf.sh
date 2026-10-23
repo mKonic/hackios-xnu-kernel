@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Boot avfboot + an XNUP payload on QEMU virt the way crosvm boots it: -kernel Image -initrd payload,
 # FDT in x0, PSCI over hvc. The console is the PL011 (crosvm's is an ns16550a at 0x3f8).
 #

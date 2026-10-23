@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Build the gpu3d probe: out/Image, an arm64 Linux Image for crosvm (AVF) and QEMU -kernel.
 # Needs clang and ld.lld (Apple's clang works with Homebrew's lld), and llvm-objcopy.
 set -euo pipefail

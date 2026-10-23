@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # mkfs.hfsplus for making /private/var's HFS+ volume under QEMU (qemu/run-ios.sh QEMU_VAR=hfs): the system's
 # when there is one, else the AUR recipe of Apple's diskdev_cmds for Linux (hfsprogs), built here and not
 # installed. Prints the program's path.
