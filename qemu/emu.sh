@@ -8,4 +8,8 @@ if [ ! -x $E ] || [ -n "$(find tools/emu -newer $E -type f | head -1)" ]; then
 	tools/emu/build.sh >/dev/null || exit 1
 fi
 SECS=${1:-3600}; shift
+# /private/var kept between boots (run-ios.sh QEMU_VAR): the first boot registers every application and
+# saves the settled volume; the boots after it start from that. QEMU_VAR=0 for a fresh volume every time.
+export QEMU_VAR=${QEMU_VAR:-1}
+[ "$QEMU_VAR" != 0 ] && [ ! -f "${QEMU_VAR_IMG:-qemu/var.img}" ] && export QEMU_VAR_SAVE_AFTER=${QEMU_VAR_SAVE_AFTER:-200}
 exec $E --secs "$SECS" -- "$@"

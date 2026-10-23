@@ -78,14 +78,29 @@ if qemu-system-aarch64 -device help 2>/dev/null | grep -q '"virtio-sound-device"
 	SOUND+=(-device virtio-sound-device,audiodev=snd,streams=1)   # one stream: output, no microphone of the host
 	CMDLINE="virtio_sound=1 $CMDLINE"
 fi
+# QEMU_VAR=1: /private/var kept between boots (userland/src/var_store.c) on a disk of its own, a sparse
+# file (qemu/var.img, or QEMU_VAR_IMG) at the phone's store offsets. QEMU_VAR_SAVE_AFTER=N saves it N
+# seconds in: boot once with it, and later boots skip the first-boot work (LaunchServices' registration
+# of every application). `rm qemu/var.img` starts from an empty volume again.
+VAR=()
+if [ -n "$QEMU_VAR" ] && [ "$QEMU_VAR" != 0 ]; then
+	VAR_IMG=${QEMU_VAR_IMG:-qemu/var.img}
+	[ -f "$VAR_IMG" ] || truncate -s 12G "$VAR_IMG"     # the store sits 8 GiB in; two 2 GiB slots
+	VAR_IMG=$(readlink -f "$VAR_IMG")                   # (run.sh starts QEMU from qemu/)
+	VAR=(-drive "file=$VAR_IMG,format=raw,if=none,id=var" -device virtio-blk-device,drive=var)
+	CMDLINE="var_store=1 virtio_blk=1 virtio_blk_rw=1 ${QEMU_VAR_SAVE_AFTER:+var_save_after=$QEMU_VAR_SAVE_AFTER }$CMDLINE"
+fi
 # EMU_QMP=<socket>: shown by the emulator (qemu/emu.sh), which attaches as QEMU's D-Bus display over QMP
 EMU=()
 [ -n "$EMU_QMP" ] && EMU=(-display dbus,p2p=yes -qmp "unix:$EMU_QMP,server=on,wait=off")
+# the profile's four cores (common/devices/qemu-virt.conf); QEMU_SMP=1 for one
+export QEMU_SMP=${QEMU_SMP:-4}
+[[ " $CMDLINE " == *" cpus="* ]] || CMDLINE="cpus=$QEMU_SMP $CMDLINE"
 xnuloader/mkpayload.py -o qemu/payload.bin kernel=$K ramdisk=$ROOT --rdres "$(printf '%x' "$(stat -c %s "$IMG")")" \
 	--cmdline "loader_return_after=$SECS epoch=$(date +%s) virtio_input=1 $CMDLINE" >/dev/null || exit 1
 QEMU_MEM=${RAM_GB}G exec qemu/run.sh $((SECS + 40)) \
 	-object memory-backend-file,id=ram,size=$RAM_SIZE,mem-path="$PWD/qemu/ram.img",share=off \
 	-machine memory-backend=ram \
-	-global virtio-mmio.force-legacy=false -device virtio-tablet-device -device virtio-keyboard-device "${NET[@]}" "${SOUND[@]}" \
+	-global virtio-mmio.force-legacy=false -device virtio-tablet-device -device virtio-keyboard-device "${NET[@]}" "${SOUND[@]}" "${VAR[@]}" \
 	-device ramfb -monitor tcp:127.0.0.1:$((4444 + 10 * INSTANCE)),server,nowait \
 	-qmp tcp:127.0.0.1:$((4445 + 10 * INSTANCE)),server,nowait "${EMU[@]}" "$@"
