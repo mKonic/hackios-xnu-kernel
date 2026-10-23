@@ -82,7 +82,7 @@ diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
 diff --git a/bsd/dev/redwood_vgpu3d_xnu.c b/bsd/dev/redwood_vgpu3d_xnu.c
 --- a/bsd/dev/redwood_vgpu3d_xnu.c
 +++ b/bsd/dev/redwood_vgpu3d_xnu.c
-@@ -55,6 +55,11 @@
+@@ -55,6 +55,13 @@
  #define VGPU3D_IOC_UNREF        _IOW('G', 2, uint32_t)
  #define VGPU3D_IOC_UPLOAD       _IOW('G', 3, struct vgpu3d_ioc_xfer)
  #define VGPU3D_IOC_DOWNLOAD     _IOW('G', 4, struct vgpu3d_ioc_xfer)
@@ -91,10 +91,12 @@ diff --git a/bsd/dev/redwood_vgpu3d_xnu.c b/bsd/dev/redwood_vgpu3d_xnu.c
 +	uint32_t res, sid;
 +};
 +#define VGPU3D_IOC_NAME         _IOW('G', 5, struct vgpu3d_ioc_name)
++/* has the display shown this colour buffer as it is? then nobody needs it copied back (1 or 0, in place) */
++#define VGPU3D_IOC_SHOWN        _IOWR('G', 6, uint32_t)
  
  #define MAX_OPENS               32
  #define MAX_RES                 64
-@@ -162,9 +167,70 @@
+@@ -162,9 +169,129 @@
  	return NULL;
  }
  
@@ -103,6 +105,9 @@ diff --git a/bsd/dev/redwood_vgpu3d_xnu.c b/bsd/dev/redwood_vgpu3d_xnu.c
 +#define MAX_NAMED               16
 +static struct {
 +	uint32_t sid, res, width, height;
++	bool shown;                             /* by the display as it is: its memory is not kept up to date */
++	struct vopen *o;
++	struct res *r;
 +} named[MAX_NAMED];                             /* (under vgpu3d_opens_lock) */
 +
 +static void
@@ -138,6 +143,8 @@ diff --git a/bsd/dev/redwood_vgpu3d_xnu.c b/bsd/dev/redwood_vgpu3d_xnu.c
 +		named[slot].res = r->id;
 +		named[slot].width = r->width;
 +		named[slot].height = r->height;
++		named[slot].o = o;
++		named[slot].r = r;
 +	}
 +	lck_mtx_unlock(&vgpu3d_opens_lock);
 +	return slot >= 0 ? 0 : ENOSPC;
@@ -147,6 +154,7 @@ diff --git a/bsd/dev/redwood_vgpu3d_xnu.c b/bsd/dev/redwood_vgpu3d_xnu.c
 +redwood_vgpu3d_show(uint32_t sid)
 +{
 +	uint32_t res = 0, width = 0, height = 0;
++	int err;
 +
 +	lck_mtx_lock(&vgpu3d_opens_lock);
 +	for (int i = 0; sid && i < MAX_NAMED; i++) {
@@ -155,7 +163,60 @@ diff --git a/bsd/dev/redwood_vgpu3d_xnu.c b/bsd/dev/redwood_vgpu3d_xnu.c
 +		}
 +	}
 +	lck_mtx_unlock(&vgpu3d_opens_lock);
-+	return res ? redwood_vgpu_show(res, width, height) : ENOENT;
++	if (res == 0) {
++		return ENOENT;
++	}
++	err = redwood_vgpu_show(res, width, height);
++	if (err == 0) {
++		lck_mtx_lock(&vgpu3d_opens_lock);
++		for (int i = 0; i < MAX_NAMED; i++) {
++			named[i].shown |= named[i].sid == sid && named[i].res == res;
++		}
++		lck_mtx_unlock(&vgpu3d_opens_lock);
++	}
++	return err;
++}
++
++/*
++ * A colour buffer the display has shown as it is has no copy in its IOSurface's memory: when that
++ * memory is to be read after all (a frame the display composes itself), the host's pixels are
++ * fetched into it first. The opens lock is held throughout, so the resource is not freed under it
++ * (res_free forgets the name first); the opener's own lock is not taken.
++ */
++int
++redwood_vgpu3d_fetch(uint32_t sid, void *dst, uint32_t stride)
++{
++	int err = ENOENT;
++
++	lck_mtx_lock(&vgpu3d_opens_lock);
++	for (int i = 0; sid && i < MAX_NAMED; i++) {
++		if (named[i].sid == sid && named[i].shown) {
++			struct res *r = named[i].r;
++			size_t pitch = (size_t)r->width * 4;
++			err = vgpu3d_transfer_box(&named[i].o->g, r->id, false, 0, 0, r->width, r->height, 0) ? EIO : 0;
++			named[i].o->g.err = 0;
++			for (uint32_t y = 0; err == 0 && y < r->height; y++) {
++				memcpy((uint8_t *)dst + (size_t)y * stride, (const uint8_t *)r->va + y * pitch, pitch);
++			}
++			break;
++		}
++	}
++	lck_mtx_unlock(&vgpu3d_opens_lock);
++	return err;
++}
++
++static int
++res_shown(uint32_t *res)
++{
++	uint32_t shown = 0;
++
++	lck_mtx_lock(&vgpu3d_opens_lock);
++	for (int i = 0; *res && i < MAX_NAMED; i++) {
++		shown |= named[i].res == *res && named[i].shown;
++	}
++	lck_mtx_unlock(&vgpu3d_opens_lock);
++	*res = shown;
++	return 0;
 +}
 +
  static void
@@ -165,12 +226,15 @@ diff --git a/bsd/dev/redwood_vgpu3d_xnu.c b/bsd/dev/redwood_vgpu3d_xnu.c
  	vgpu3d_resource_unref(&o->g, r->id);
  	o->g.err = 0;
  	kmem_free(kernel_map, r->va, r->size);
-@@ -452,6 +518,9 @@
+@@ -452,6 +579,12 @@
  	case VGPU3D_IOC_DOWNLOAD:
  		err = res_xfer(o, (struct vgpu3d_ioc_xfer *)data, false);
  		break;
 +	case VGPU3D_IOC_NAME:
 +		err = res_name(o, (struct vgpu3d_ioc_name *)data);
++		break;
++	case VGPU3D_IOC_SHOWN:
++		err = res_shown((uint32_t *)data);
 +		break;
  	default:
  		err = ENOTTY;
@@ -178,7 +242,7 @@ diff --git a/bsd/dev/redwood_vgpu3d_xnu.c b/bsd/dev/redwood_vgpu3d_xnu.c
 diff --git a/bsd/sys/redwood_vgpu.h b/bsd/sys/redwood_vgpu.h
 --- a/bsd/sys/redwood_vgpu.h
 +++ b/bsd/sys/redwood_vgpu.h
-@@ -41,6 +41,16 @@
+@@ -41,6 +41,22 @@
  /* The rectangle changed: copy it to the host's resource and show it. 0 or EIO. */
  int redwood_vgpu_flush(uint32_t x, uint32_t y, uint32_t width, uint32_t height);
  /*
@@ -192,22 +256,29 @@ diff --git a/bsd/sys/redwood_vgpu.h b/bsd/sys/redwood_vgpu.h
 + */
 +int redwood_vgpu3d_show(uint32_t sid);
 +/*
++ * Such a buffer, once shown so, is not copied back into its IOSurface by its user: before the
++ * display reads that memory itself, the host's pixels are fetched into it (dst, stride bytes a
++ * row). 0, or ENOENT when `sid` is no such buffer (its memory is as its user left it).
++ */
++int redwood_vgpu3d_fetch(uint32_t sid, void *dst, uint32_t stride);
++/*
   * One command on the control queue, waited for: cmd (starting with struct virtio_gpu_ctrl_hdr)
   * is copied to device-visible memory, the response (resp_len bytes at most) back. Serialized
   * with the 2D driver's own commands; may sleep. 0, EINVAL (too long), ENODEV, or ETIMEDOUT.
 diff --git a/iokit/Kernel/MiniIOMobileFramebuffer.cpp b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
 --- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
 +++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
-@@ -81,6 +81,8 @@
+@@ -81,6 +81,9 @@
   */
  extern "C" int redwood_vgpu_display(void ** fb, uint32_t * width, uint32_t * height, uint32_t * stride);
  extern "C" int redwood_vgpu_flush(uint32_t x, uint32_t y, uint32_t width, uint32_t height);
 +/* a surface the host's GPU drew, shown as the colour buffer it is (bsd/dev/redwood_vgpu3d_xnu.c) */
 +extern "C" int redwood_vgpu3d_show(uint32_t sid);
++extern "C" int redwood_vgpu3d_fetch(uint32_t sid, void * dst, uint32_t stride);
  static bool gVGPU;
  
  static TUNABLE(uint64_t, gSCFBAddr, "scfb.addr", 0);
-@@ -388,6 +390,7 @@
+@@ -388,6 +391,7 @@
  	uint64_t        fStatWaiting;           /* how long frames waited for the GPU here */
  	/* how the display is doing: frames and time spent drawing them here since fStatSince */
  	uint32_t        fStatFrames;
@@ -215,7 +286,7 @@ diff --git a/iokit/Kernel/MiniIOMobileFramebuffer.cpp b/iokit/Kernel/MiniIOMobil
  	uint64_t        fStatSince, fStatDrawing;
  	/* ... and how evenly: the time from each frame to the next, counted by the millisecond (the last count: longer) */
  	uint64_t        fLastFrame;
-@@ -1114,8 +1117,35 @@
+@@ -1114,8 +1118,35 @@
  		    swapWord(swap, SWAP_ID), fSwapsShown, swapWord(swap, SWAP_SURFACE(0)), swapWord(swap, SWAP_SURFACE(1)),
  		    swapWord(swap, SWAP_SURFACE(2)), swapWord(swap, SWAP_SURFACE(3)), set, swapWord(swap, SWAP_LAYERS_CLEARED));
  	}
@@ -252,7 +323,18 @@ diff --git a/iokit/Kernel/MiniIOMobileFramebuffer.cpp b/iokit/Kernel/MiniIOMobil
  		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
  		int32_t src[4], dst[4];
  		MiniIOSurface * s;
-@@ -1165,7 +1195,7 @@
+@@ -1157,6 +1188,10 @@
+ 				fGraphics = true;
+ 				PE_initialize_console(NULL, kPEGraphicsMode);
+ 			}
++			if (gVGPU) {
++				/* (a surface last shown as the GPU's own buffer: its memory is fetched first) */
++				redwood_vgpu3d_fetch(sid, s->pixels(), s->info.bytesPerRow);
++			}
+ 			drawLayer(s, src, dst);
+ 			if (layer == 0) {
+ 				recorded = s;   /* (recorded once the frame is in the panel's memory: see below) */
+@@ -1165,7 +1200,7 @@
  	}
  	drawn = mach_absolute_time();
  	scfbPublish(fPanelWidth, fPanelHeight);
@@ -261,7 +343,7 @@ diff --git a/iokit/Kernel/MiniIOMobileFramebuffer.cpp b/iokit/Kernel/MiniIOMobil
  		redwood_vgpu_flush(0, 0, fPanelWidth, fPanelHeight);
  	}
  	if (recorded != NULL) {
-@@ -1199,10 +1229,11 @@
+@@ -1199,10 +1234,11 @@
  		absolutetime_to_nanoseconds(fStatBeatWait, &beat);
  		IOLog("MiniIOMobileFramebuffer: %u frames in %llu ms (%llu a second), %llu us each in the driver, after %llu us "
  		    "waiting for the GPU and, %u of them, %llu us for the next refresh; %u swaps waited for the frame before, "

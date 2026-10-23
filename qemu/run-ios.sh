@@ -99,7 +99,8 @@ fi
 GPU=(-device ramfb)
 if [ -n "$QEMU_GPU" ] && [ "$QEMU_GPU" != 0 ]; then
 	GPU+=(-device virtio-gpu-rutabaga-device,x-gfxstream-gles=on,hostmem=256M)
-	# QEMU_GPU=panel: no ramfb, the GPU's scanout is the panel (the kernel's virtio-gpu 2D path)
+	# QEMU_GPU=panel: no ramfb, the GPU's scanout is the panel: a frame CoreAnimation drew on the GPU is
+	# shown as the colour buffer it is (patch 1303), no copy in the guest; qemu/emu.sh's default
 	[ "$QEMU_GPU" = panel ] && GPU=(-device virtio-gpu-rutabaga-device,x-gfxstream-gles=on,hostmem=256M,xres=1125,yres=2436)
 	unset WAYLAND_DISPLAY DISPLAY
 fi
