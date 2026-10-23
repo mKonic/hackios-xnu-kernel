@@ -92,7 +92,9 @@ struct ListenerCalls {
 			g_variant_unref(data);
 			s.enabled = true, ++s.serial;
 		} else if (m == "Disable") {
-			s.enabled = false, ++s.serial;
+			// Kept as it is: QEMU disables the console for an instant every time the scanout moves to
+			// another resource (the guest's buffers in turn), and a blank there is a flicker each frame.
+			// A panel keeps its last picture too.
 		}
 				g_dbus_method_invocation_return_value(inv, nullptr);
 	}
