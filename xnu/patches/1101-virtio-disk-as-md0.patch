@@ -1,0 +1,64 @@
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+index 1e64e96..42781e7 100644
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -755,6 +755,15 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
+ //	It will become /dev/mdx, where x is 0-f.
+ //
+ 
++	/*
++	 * md0=rvblkN: the system volume, which HackiOS's user space knows as md0 (the root, and the
++	 * container its cryptexes are mounted from: "/dev/md0,c=N"), is that virtio disk instead of a
++	 * RAM disk: under crosvm the host serves the 2.5 GB image from its own storage. The RAM
++	 * disks then start at md1, where stage0 looks for the small image (root.apfs).
++	 */
++	char md0Disk[16] = "";
++	bool md0Virtio = PE_parse_boot_argn("md0", md0Disk, sizeof(md0Disk)) && strncmp(md0Disk, "rvblk", 5) == 0;
++
+ 	if (!didRam) {                                                                                           /* Have we already build this ram disk? */
+ 		didRam = 1;                                                                                             /* Remember we did this */
+ 		if ((regEntry = IORegistryEntry::fromPath( "/chosen/memory-map", gIODTPlane ))) {        /* Find the map node */
+@@ -768,7 +777,7 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
+ 					panic("ramdisk params");
+ 				}
+ #endif /* __LP64__ */
+-				(void)mdevadd(-1, ml_static_ptovirt(ramdParms[0]) >> 12, (unsigned int) (ramdParms[1] >> 12), 0);        /* Initialize it and pass back the device number */
++				(void)mdevadd(md0Virtio ? 1 : -1, ml_static_ptovirt(ramdParms[0]) >> 12, (unsigned int) (ramdParms[1] >> 12), 0);        /* Initialize it and pass back the device number */
+ 			}
+ 			/*
+ 			 * A second image the loader may have left in memory (it becomes
+@@ -778,7 +787,7 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
+ 			if (data && data->getLength() >= 2 * sizeof(uintptr_t)) {
+ 				uintptr_t *ramdParms = (uintptr_t *)data->getBytesNoCopy();
+ 				if (ramdParms[1] <= (((uint64_t)UINT_MAX) << 12)) {
+-					(void)mdevadd(-1, ml_static_ptovirt(ramdParms[0]) >> 12, (unsigned int) (ramdParms[1] >> 12), 0);
++					(void)mdevadd(md0Virtio ? 2 : -1, ml_static_ptovirt(ramdParms[0]) >> 12, (unsigned int) (ramdParms[1] >> 12), 0);
+ 				}
+ 			}
+ 			regEntry->release();                                                            /* Toss the entry */
+@@ -802,6 +811,25 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
+ 		goto iofrootx;
+ 	}
+ 
++//
++//	rd=md0 with md0=rvblkN: the root is that virtio disk, also reachable as /dev/md0
++//
++	if (md0Virtio && strcmp(rdBootVar, "md0") == 0) {
++		extern int redwood_virtio_blk_rootdev(const char *name, dev_t *dev);
++		extern int redwood_virtio_blk_alias(const char *disk, const char *name);
++		int vblk_error;
++
++		OSSafeReleaseNULL(matching);
++		if ((vblk_error = redwood_virtio_blk_rootdev(md0Disk, root)) != 0) {
++			panic("IOFindBSDRoot: md0=%s: no such virtio disk: %d", md0Disk, vblk_error);
++		}
++		(void)redwood_virtio_blk_alias(md0Disk, "md0");
++		strlcpy(rootName, "md0", rootNameSize);
++		IOLog("BSD root: md0 = %s, major %d, minor %d\n", md0Disk, major(*root), minor(*root));
++		*oflags = 0;
++		goto iofrootx;
++	}
++
+ //
+ //	Now check if we are trying to root on a memory device
+ //

@@ -19,6 +19,8 @@
 !/uefi/
 !/prebuilt/
 !/wifi/
+!/.github/
+!/avf/
 
 __pycache__/
 *~

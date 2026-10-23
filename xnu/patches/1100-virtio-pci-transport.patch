@@ -1,0 +1,129 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 9cd24b4..d8e23ea 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -132,6 +132,9 @@ bsd/dev/redwood_mic.c		standard
+ bsd/dev/redwood_wifi.c		standard
+ bsd/dev/redwood_adsp.c		standard
+ bsd/dev/redwood_image.c		standard
++bsd/dev/redwood_pci.c		standard
++bsd/dev/redwood_virtio.c	standard
++bsd/dev/redwood_virtio_console.c	standard
+ bsd/dev/redwood_virtio_blk.c	standard
+ bsd/dev/redwood_sparse.c	standard
+ bsd/dev/redwood_apfs_check.c	optional apfs
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index 16cf4fd..b9fb59d 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -912,7 +912,14 @@ bsd_init(void)
+ 	init_rootvnode = NULLVP;  /* use rootvnode after this point */
+ 
+ 
+-	if (!bsd_rooted_ramdisk()) {
++	/*
++	 * A virtio disk root (rd=rvblkN, bsd/dev/redwood_virtio_blk.c) is an image the host serves,
++	 * like a RAM disk: nothing here can verify a seal on it.
++	 */
++	char rd_virtio[16] = "";
++	bool rooted_virtio = PE_parse_boot_argn("rd", rd_virtio, sizeof(rd_virtio)) && strncmp(rd_virtio, "rvblk", 5) == 0;
++
++	if (!bsd_rooted_ramdisk() && !rooted_virtio) {
+ 		boolean_t require_rootauth = FALSE;
+ 
+ #if XNU_TARGET_OS_OSX && defined(__arm64__)
+diff --git a/iokit/bsddev/IOKitBSDInit.cpp b/iokit/bsddev/IOKitBSDInit.cpp
+index 29978e9..1e64e96 100644
+--- a/iokit/bsddev/IOKitBSDInit.cpp
++++ b/iokit/bsddev/IOKitBSDInit.cpp
+@@ -686,7 +686,8 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
+ 	// A memory-device root needs no filesystem kext, so do not sit out the timeout for one
+ 	char rdEarly[kMaxBootVar];
+ 	uint64_t bsdWait = 30ULL * kSecondScale;
+-	if (PE_parse_boot_argn("rd", rdEarly, sizeof(rdEarly)) && rdEarly[0] == 'm' && rdEarly[1] == 'd') {
++	if (PE_parse_boot_argn("rd", rdEarly, sizeof(rdEarly)) &&
++	    ((rdEarly[0] == 'm' && rdEarly[1] == 'd') || strncmp(rdEarly, "rvblk", 5) == 0)) {
+ 		bsdWait = kSecondScale / 10;
+ 	}
+ 
+@@ -784,6 +785,23 @@ IOFindBSDRoot( char * rootName, unsigned int rootNameSize,
+ 		}
+ 	}
+ 
++//
++//	A virtio disk (bsd/dev/redwood_virtio_blk.c): rd=rvblk0 roots on the first one
++//
++	if (strncmp(rdBootVar, "rvblk", 5) == 0) {
++		extern int redwood_virtio_blk_rootdev(const char *name, dev_t *dev);
++		int vblk_error;
++
++		OSSafeReleaseNULL(matching);
++		if ((vblk_error = redwood_virtio_blk_rootdev(rdBootVar, root)) != 0) {
++			panic("IOFindBSDRoot: virtio root %s unavailable: %d", rdBootVar, vblk_error);
++		}
++		strlcpy(rootName, rdBootVar, rootNameSize);
++		IOLog("BSD root: %s, major %d, minor %d\n", rootName, major(*root), minor(*root));
++		*oflags = 0;
++		goto iofrootx;
++	}
++
+ //
+ //	Now check if we are trying to root on a memory device
+ //
+diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
+index 997a4ab..c7a9f81 100644
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -697,6 +697,27 @@ register_serial_functions(struct pe_serial_functions *fns)
+ 	gPESF = fns;
+ }
+ 
++/*
++ * A virtio console (port 0 of the first virtio-console device, over virtio-pci or
++ * virtio-mmio): bsd/dev/redwood_virtio_console.c. For virtual machines without a UART.
++ */
++extern bool redwood_vcon_probe(bool other);
++extern void redwood_vcon_init(void);
++extern unsigned int redwood_vcon_transmit_ready(void);
++extern void redwood_vcon_transmit_data(uint8_t c);
++extern unsigned int redwood_vcon_receive_ready(void);
++extern uint8_t redwood_vcon_receive_data(void);
++
++SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) virtio_console_serial_functions =
++{
++	.init = redwood_vcon_init,
++	.transmit_ready = redwood_vcon_transmit_ready,
++	.transmit_data = redwood_vcon_transmit_data,
++	.receive_ready = redwood_vcon_receive_ready,
++	.receive_data = redwood_vcon_receive_data,
++	.device = SERIAL_VIRTIO_CONSOLE
++};
++
+ #if HIBERNATION
+ /**
+  * Transitions the serial driver into a mode that can be run in the hibernation
+@@ -897,6 +918,10 @@ serial_init(void)
+ 	}
+ #endif /* APPLE_UART */
+ 
++	if (redwood_vcon_probe(gPESF != NULL)) {
++		register_serial_functions(&virtio_console_serial_functions);
++	}
++
+ 	if (gPESF == NULL) {
+ 		return 0;
+ 	}
+diff --git a/pexpert/pexpert/arm/protos.h b/pexpert/pexpert/arm/protos.h
+index 404b50b..b3a59cc 100644
+--- a/pexpert/pexpert/arm/protos.h
++++ b/pexpert/pexpert/arm/protos.h
+@@ -47,7 +47,8 @@ typedef enum serial_device {
+ 	SERIAL_DOCKCHANNEL=0x2,
+ 	SERIAL_PI3_UART=0x4,
+ 	SERIAL_VMAPPLE_UART=0x8,
+-	SERIAL_DCC_UART=0x10
++	SERIAL_DCC_UART=0x10,
++	SERIAL_VIRTIO_CONSOLE=0x100     /* bsd/dev/redwood_virtio_console.c */
+ } serial_device_t;
+ 
+ kern_return_t serial_irq_enable(serial_device_t device);

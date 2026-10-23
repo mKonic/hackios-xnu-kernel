@@ -1,0 +1,139 @@
+diff --git a/iokit/Kernel/MiniIOMobileFramebuffer.cpp b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+index a537cb6..69009fe 100644
+--- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -42,6 +42,110 @@ extern struct vc_info vinfo;            /* the boot framebuffer, as the text con
+ 
+ extern "C" void redwood_tl(const char * format, ...) __printflike(1, 2);
+ 
++/*
++ * Scion shared framebuffer (SCFB), for the Android Virtualization Framework: crosvm has no ramfb,
++ * and an ordinary app cannot take crosvm's virtio-gpu display. Instead the app lends the VM a
++ * slice of RAM that it maps too (an ashmem region crosvm maps as guest memory), and the boot
++ * framebuffer is in it. avfboot (avf/shim) finds it in the kernel parameters
++ * scfb.addr=PA scfb.size=N scfb.w=W scfb.h=H, keeps it out of the kernel's memory, writes the
++ * header below and points boot_args' video at buffer 0. Here, every frame that has been drawn
++ * into the panel's memory is published: frame_seq goes up, and the app copies the buffer to its
++ * screen. There is one buffer, drawn in place (the layers of a swap only redraw what they cover),
++ * so it is guarded like a seqlock: before drawing we wait while the app is copying
++ * (host_reading, 4 ms at most) and set drawing; the app waits while drawing is set and copies
++ * again if a frame began meanwhile. No half-drawn frame reaches the screen. The header layout is
++ * the app's (display/SCFB.md in scion-avf); only the fields used are named here.
++ */
++#define SCFB_MAGIC              0x42464353u     /* "SCFB" */
++#define SCFB_F_READY            1u              /* the header is valid */
++#define SCFB_F_POLL             2u              /* nothing publishes frames yet: copy now and then */
++struct scfb_header {
++	uint32_t        magic, version;
++	uint32_t        width, height;
++	uint32_t        stride, format;
++	uint32_t        buf_offset[2];
++	uint32_t        nbufs, flags;
++	uint32_t        front;
++	uint32_t        drawing;                /* 1 while a frame is drawn into the buffer (seqlock with host_reading) */
++	uint64_t        frame_seq;              /* frames published */
++	uint64_t        input_seq;              /* (input reports consumed: not known here, 0) */
++	uint64_t        guest_ns;               /* when the frame was published */
++	uint32_t        dirty[4];               /* x, y, width, height that changed */
++	uint64_t        host_seq;               /* the app: last frame copied */
++	uint64_t        host_reading;
++	uint64_t        host_ns;
++};
++static TUNABLE(uint64_t, gSCFBAddr, "scfb.addr", 0);
++static volatile struct scfb_header * gSCFB;
++extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++
++static void
++scfbAttach(void)
++{
++	volatile struct scfb_header * h;
++
++	if (gSCFBAddr == 0) {
++		return;
++	}
++	h = (volatile struct scfb_header *) ml_io_map((vm_offset_t) gSCFBAddr, PAGE_SIZE);
++	if (h == NULL || h->magic != SCFB_MAGIC) {
++		IOLog("MiniIOMobileFramebuffer: no shared framebuffer header at 0x%llx\n", gSCFBAddr);
++		return;
++	}
++	IOLog("MiniIOMobileFramebuffer: shared framebuffer at 0x%llx: %ux%u, %u bytes a row, format 0x%x, app at frame %llu\n",
++	    gSCFBAddr, h->width, h->height, h->stride, h->format, h->host_seq);
++	gSCFB = h;
++}
++
++/* A frame is about to be drawn into the panel's memory: wait for the app to finish copying. */
++static void
++scfbBeginDraw(void)
++{
++	volatile struct scfb_header * h = gSCFB;
++	uint64_t deadline;
++
++	if (h == NULL) {
++		return;
++	}
++	clock_interval_to_deadline(4, NSEC_PER_MSEC, &deadline);
++	for (;;) {
++		while (h->host_reading != 0 && mach_absolute_time() < deadline) {
++		}
++		h->drawing = 1;
++		__builtin_arm_dsb(0xb);
++		if (h->host_reading == 0 || mach_absolute_time() >= deadline) {
++			break;
++		}
++		h->drawing = 0;                 /* both at once: the app goes first */
++		__builtin_arm_dsb(0xb);
++	}
++}
++
++/* The frame is in the panel's memory: tell the app. */
++static void
++scfbPublish(uint32_t width, uint32_t height)
++{
++	volatile struct scfb_header * h = gSCFB;
++	uint64_t nanos;
++
++	if (h == NULL) {
++		return;
++	}
++	__builtin_arm_dsb(0xf);                 /* (SY) the frame's write-combined stores are out */
++	absolutetime_to_nanoseconds(mach_absolute_time(), &nanos);
++	h->dirty[0] = 0;
++	h->dirty[1] = 0;
++	h->dirty[2] = width;
++	h->dirty[3] = height;
++	h->guest_ns = nanos;
++	h->front = 0;
++	__builtin_arm_dmb(0xb);
++	h->drawing = 0;
++	h->frame_seq = h->frame_seq + 1;
++	h->flags = SCFB_F_READY;                /* from now on every frame says so itself */
++	__builtin_arm_dsb(0xb);
++}
++
+ /* IOConnectCallMethod selectors of the framebuffer user client (iOS 16.5) */
+ enum {
+ 	kFBMethodGetLayerDefaultSurface = 3,
+@@ -443,6 +547,7 @@ IOMobileFramebuffer::start(IOService * provider)
+ 		}
+ 	}
+ 	fColumn = IONewZero(uint32_t, fPanelWidth);
++	scfbAttach();
+ 	fColumnWeight = IONewZero(uint16_t, fPanelWidth);
+ 	fDiff = gDiff != 0;
+ 	fDiffLeft = fDiffTop = ~0u;
+@@ -994,6 +1099,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
+ 		    swapWord(swap, SWAP_ID), fSwapsShown, swapWord(swap, SWAP_SURFACE(0)), swapWord(swap, SWAP_SURFACE(1)),
+ 		    swapWord(swap, SWAP_SURFACE(2)), swapWord(swap, SWAP_SURFACE(3)), set, swapWord(swap, SWAP_LAYERS_CLEARED));
+ 	}
++	scfbBeginDraw();
+ 	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
+ 		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
+ 		int32_t src[4], dst[4];
+@@ -1043,6 +1149,7 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
+ 		}
+ 	}
+ 	drawn = mach_absolute_time();
++	scfbPublish(fPanelWidth, fPanelHeight);
+ 	if (recorded != NULL) {
+ 		record(recorded);
+ 	}

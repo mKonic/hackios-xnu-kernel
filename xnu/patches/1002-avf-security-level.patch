@@ -1,0 +1,136 @@
+diff --git a/bsd/kern/kern_cs.c b/bsd/kern/kern_cs.c
+index 43b1ea6..ce18544 100644
+--- a/bsd/kern/kern_cs.c
++++ b/bsd/kern/kern_cs.c
+@@ -175,6 +175,23 @@ cs_init(void)
+ 		cs_enforcement_panic = (panic != 0);
+ 	}
+ 
++#if CONFIG_MACF
++	/* boot-arg security= (bsd/kern/kern_minimac.c): off = no enforcement, full = every process */
++	extern int minimac_security_level(void);
++	switch (minimac_security_level()) {
++	case 0:
++		cs_system_enforcement_enable = 0;
++		cs_process_enforcement_enable = 0;
++		break;
++	case 2:
++		cs_system_enforcement_enable = 1;
++		cs_process_enforcement_enable = 1;
++		break;
++	default:
++		break;
++	}
++#endif /* CONFIG_MACF */
++
+ 	PE_parse_boot_argn("cs_relax_platform_task_ports",
+ 	    &cs_relax_platform_task_ports,
+ 	    sizeof(cs_relax_platform_task_ports));
+diff --git a/bsd/kern/kern_minimac.c b/bsd/kern/kern_minimac.c
+index f65c979..1c840d7 100644
+--- a/bsd/kern/kern_minimac.c
++++ b/bsd/kern/kern_minimac.c
+@@ -39,8 +39,53 @@
+ #include <vm/vm_map.h>
+ #include <security/mac_framework.h>
+ #include <security/mac_policy.h>
++#include <pexpert/pexpert.h>
+ 
+ void minimac_policy_init(void);
++int minimac_security_level(void);
++
++/*
++ * boot-arg security=full|bringup|off (default bringup): how much of what these stand-ins and
++ * the kernel's own code-signing checks can enforce is enforced. See avf/README.md.
++ *
++ *   off      AMFI: every signature accepted, ad hoc ones as platform binaries, dyld may do
++ *            anything (DYLD_* variables, inserted libraries) for anyone, "not enforcing" when
++ *            asked; Sandbox: everything allowed, every privilege granted to everyone; no
++ *            code-signing enforcement, not even of the dyld shared cache.
++ *   bringup  as HackiOS has always run: as off, but privileges only by entitlement (the table
++ *            below) and the kernel's default code-signing checks (the shared cache's).
++ *   full     as bringup, and: code-signing enforcement for every process (code pages are
++ *            checked against their signature; unsigned code is killed), dyld's freedoms only
++ *            for platform binaries, and AMFI says "enforcing" when asked.
++ *
++ * None of this is iOS's security model: there is no trust cache, no Sandbox profile is
++ * evaluated, and an ad hoc signature counts as Apple's.
++ */
++#define MINIMAC_SECURITY_OFF      0
++#define MINIMAC_SECURITY_BRINGUP  1
++#define MINIMAC_SECURITY_FULL     2
++
++static int minimac_level = -1;
++
++int
++minimac_security_level(void)
++{
++	char value[16];
++
++	if (minimac_level < 0) {
++		minimac_level = MINIMAC_SECURITY_BRINGUP;
++		if (PE_parse_boot_arg_str("security", value, sizeof(value))) {
++			if (strcmp(value, "off") == 0) {
++				minimac_level = MINIMAC_SECURITY_OFF;
++			} else if (strcmp(value, "full") == 0) {
++				minimac_level = MINIMAC_SECURITY_FULL;
++			} else if (strcmp(value, "bringup") != 0) {
++				printf("security: unknown level \"%s\", using bringup\n", value);
++			}
++		}
++	}
++	return minimac_level;
++}
+ 
+ static int
+ miniamfi_vnode_check_signature(__unused struct vnode *vp, __unused struct label *label, __unused cpu_type_t cpu_type,
+@@ -87,7 +132,7 @@ miniamfi_vnode_check_signature(__unused struct vnode *vp, __unused struct label
+ #define AMFI_BOOTARG_STATE_NOT_ENFORCING 0x86ULL
+ 
+ static int
+-miniamfi_policy_syscall(__unused struct proc *p, int call, user_addr_t arg)
++miniamfi_policy_syscall(struct proc *p, int call, user_addr_t arg)
+ {
+ 	struct {
+ 		uint64_t input_flags;
+@@ -98,8 +143,16 @@ miniamfi_policy_syscall(__unused struct proc *p, int call, user_addr_t arg)
+ 	int error;
+ 
+ 	if (call == AMFI_SYSCALL_QUERY_BOOTARG_STATE) {
++		if (minimac_security_level() == MINIMAC_SECURITY_FULL) {
++			state = 0;              /* enforcing (ExtensionKit then wants AMFI's service, which is not here) */
++		}
+ 		return copyout(&state, arg, sizeof(state));
+ 	}
++	/* full: the DYLD_* variables and inserted libraries only for platform binaries */
++	if (minimac_security_level() == MINIMAC_SECURITY_FULL && p != NULL &&
++	    (proc_getcsflags(p) & CS_PLATFORM_BINARY) == 0) {
++		flags = 0;
++	}
+ 	if (call != AMFI_SYSCALL_CHECK_DYLD_POLICY) {
+ 		return ENOPOLICY;               /* what user space got before there was a handler */
+ 	}
+@@ -322,7 +375,7 @@ minisandbox_priv_grant(kauth_cred_t cred, int priv)
+ 	static unsigned seen_count;
+ 	proc_t proc = current_proc();
+ 
+-	if (priv == PRIV_WORK_INTERVAL) {
++	if (priv == PRIV_WORK_INTERVAL || minimac_security_level() == MINIMAC_SECURITY_OFF) {
+ 		return 0;
+ 	}
+ 	/* (the entitlements are the current process's: only for a question about its own credential) */
+@@ -364,6 +417,14 @@ SECURITY_READ_ONLY_LATE(static mac_policy_handle_t) minisandbox_handle;
+ void
+ minimac_policy_init(void)
+ {
++	static const char *const names[] = { "off", "bringup", "full" };
++	int level = minimac_security_level();
++
+ 	mac_policy_register(&miniamfi_conf, &miniamfi_handle, NULL);
+ 	mac_policy_register(&minisandbox_conf, &minisandbox_handle, NULL);
++	printf("security: %s (boot-arg security=full|bringup|off): AMFI stand-in, Sandbox stand-in; "
++	    "privileges %s; dyld freedoms %s; code-signing enforcement %s\n", names[level],
++	    level == MINIMAC_SECURITY_OFF ? "for everyone" : "by entitlement",
++	    level == MINIMAC_SECURITY_FULL ? "for platform binaries" : "for everyone",
++	    level == MINIMAC_SECURITY_FULL ? "for every process" : level == MINIMAC_SECURITY_OFF ? "off" : "shared cache only");
+ }

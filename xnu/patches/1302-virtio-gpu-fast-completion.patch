@@ -1,0 +1,36 @@
+diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
+index 5c15113..0c805f7 100644
+--- a/bsd/dev/redwood_vgpu.c
++++ b/bsd/dev/redwood_vgpu.c
+@@ -158,12 +158,28 @@ vgpu_submit(const void *cmd, uint32_t cmd_len, void *resp, uint32_t resp_len)
+ 		return EIO;
+ 	}
+ 	vio_queue_kick(vg.ctrlq);
+-	for (int waited = 0; (done = vio_queue_get(vg.ctrlq, &len)) == NULL; waited++) {
+-		if (waited >= 200) {            /* 2 s */
++	/*
++	 * Most commands are answered in tens of microseconds, and 3D ones (a gfxstream pipe read
++	 * waits for the host's render thread) in a few milliseconds. Interrupts may not come
++	 * (polled), and a sleep is 10 ms at least: spin for the first 4 ms, then sleep a millisecond
++	 * at a time. A read of the pipe may wait for long GPU work: give up after 20 s, not 2.
++	 */
++	uint64_t now = mach_absolute_time(), spin_end, give_up;
++	nanoseconds_to_absolutetime(4 * NSEC_PER_MSEC, &spin_end);
++	nanoseconds_to_absolutetime(20 * NSEC_PER_SEC, &give_up);
++	spin_end += now;
++	give_up += now;
++	while ((done = vio_queue_get(vg.ctrlq, &len)) == NULL) {
++		now = mach_absolute_time();
++		if (now > give_up) {
+ 			printf("virtio-gpu: command 0x%x not answered\n", ((const struct ctrl_hdr *)cmd)->type);
+ 			return ETIMEDOUT;
+ 		}
+-		vio_intr_wait(vg.dev, seq, 10 * NSEC_PER_MSEC);
++		if (now < spin_end) {
++			__asm__ volatile ("yield");
++			continue;
++		}
++		vio_intr_wait(vg.dev, seq, NSEC_PER_MSEC);
+ 		seq = vio_intr_seq(vg.dev);
+ 	}
+ 	vio_intr_isr(vg.dev);

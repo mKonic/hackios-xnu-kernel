@@ -1,0 +1,100 @@
+diff --git a/pexpert/arm/pe_serial.c b/pexpert/arm/pe_serial.c
+index 997a4ab..3ee150b 100644
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -681,6 +681,71 @@ SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) vmapple_uart_serial_f
+ 
+ /*****************************************************************************/
+ 
++#ifdef VMAPPLE_UART
++/*
++ * 8250/16550 UART (device tree: uart0 with compatible "ns16550a"), the console
++ * of crosvm, the VMM of Android's virtualization framework: ttyS0 at 0x3f8,
++ * which AVF captures as the VM's console. Byte-wide registers, one byte
++ * apart; crosvm ignores accesses of any other width.
++ */
++static vm_offset_t ns16550_base_vaddr = 0;
++
++#define NS16550_REG(off)        (*(volatile uint8_t *)(ns16550_base_vaddr + (off)))
++#define NS16550_RBR_THR         0x0
++#define NS16550_IER             0x1
++#define NS16550_FCR             0x2
++#define NS16550_LCR             0x3
++#define NS16550_MCR             0x4
++#define NS16550_LSR             0x5
++#define NS16550_LSR_DR          0x01u
++#define NS16550_LSR_THRE        0x20u
++
++static unsigned int
++ns16550_transmit_ready(void)
++{
++	return (unsigned int) !!(NS16550_REG(NS16550_LSR) & NS16550_LSR_THRE);
++}
++
++static void
++ns16550_transmit_data(uint8_t c)
++{
++	NS16550_REG(NS16550_RBR_THR) = c;
++}
++
++static unsigned int
++ns16550_receive_ready(void)
++{
++	return (unsigned int) !!(NS16550_REG(NS16550_LSR) & NS16550_LSR_DR);
++}
++
++static uint8_t
++ns16550_receive_data(void)
++{
++	return NS16550_REG(NS16550_RBR_THR);
++}
++
++static void
++ns16550_init(void)
++{
++	NS16550_REG(NS16550_IER) = 0x00;        /* polled */
++	NS16550_REG(NS16550_LCR) = 0x03;        /* 8N1, divisor latch off: keep the firmware's baud rate */
++	NS16550_REG(NS16550_FCR) = 0x07;        /* FIFOs on and cleared */
++	NS16550_REG(NS16550_MCR) = 0x03;        /* DTR, RTS */
++}
++
++SECURITY_READ_ONLY_LATE(static struct pe_serial_functions) ns16550_serial_functions =
++{
++	.init = ns16550_init,
++	.transmit_ready = ns16550_transmit_ready,
++	.transmit_data = ns16550_transmit_data,
++	.receive_ready = ns16550_receive_ready,
++	.receive_data = ns16550_receive_data,
++	.device = SERIAL_VMAPPLE_UART
++};
++#endif /* VMAPPLE_UART */
++
++/*****************************************************************************/
++
+ /**
+  * Output @str onto every registered serial interface by polling.
+  *
+@@ -793,11 +858,21 @@ serial_init(void)
+ 
+ #ifdef VMAPPLE_UART
+ 	if (SecureDTFindEntry("name", "uart0", &entryP) == kSuccess) {
++		char const *uart_compat = NULL;
++		unsigned int compat_size = 0;
++
+ 		SecureDTGetProperty(entryP, "reg", (void const **)&reg_prop, &prop_size);
+-		vmapple_uart0_base_vaddr = ml_io_map(soc_base + *reg_prop, *(reg_prop + 1));
++		if (SecureDTGetProperty(entryP, "compatible", (void const **)&uart_compat, &compat_size) == kSuccess &&
++		    compat_size >= sizeof("ns16550a") && strcmp(uart_compat, "ns16550a") == 0) {
++			ns16550_base_vaddr = ml_io_map(soc_base + *reg_prop, *(reg_prop + 1));
++		} else {
++			vmapple_uart0_base_vaddr = ml_io_map(soc_base + *reg_prop, *(reg_prop + 1));
++		}
+ 	}
+ 
+-	if (vmapple_uart0_base_vaddr != 0) {
++	if (ns16550_base_vaddr != 0) {
++		register_serial_functions(&ns16550_serial_functions);
++	} else if (vmapple_uart0_base_vaddr != 0) {
+ 		register_serial_functions(&vmapple_uart_serial_functions);
+ 	}
+ #endif /* VMAPPLE_UART */

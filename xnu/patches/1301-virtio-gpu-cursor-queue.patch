@@ -1,0 +1,26 @@
+diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
+index 24c1f74..5c15113 100644
+--- a/bsd/dev/redwood_vgpu.c
++++ b/bsd/dev/redwood_vgpu.c
+@@ -84,6 +84,7 @@ static struct {
+ 	int state;                              /* 0 not tried, 1 up, -1 no device */
+ 	vio_dev_t *dev;
+ 	vio_queue_t *ctrlq;
++	vio_queue_t *cursorq;                  /* unused, but crosvm wants it set up */
+ 	uint64_t features;
+ 	uint8_t *cmd, *resp;                    /* device-visible bounce buffers */
+ 	uint64_t cmd_pa, resp_pa;
+@@ -108,7 +109,12 @@ vgpu_setup(void)
+ 	if ((d = vio_find(VIRTIO_ID_GPU, 0)) == NULL) {
+ 		return ENODEV;
+ 	}
+-	if (vio_init(d, want, &vg.features) != 0 || vio_queue_setup(d, 0, 0, &vg.ctrlq) != 0) {
++	/*
++	 * Both queues: crosvm activates virtio-gpu only once the cursor queue (1) is set up as
++	 * well ("pcivirtio-gpu activate failed: expected 2 queues, got 1"); nothing is put on it.
++	 */
++	if (vio_init(d, want, &vg.features) != 0 || vio_queue_setup(d, 0, 0, &vg.ctrlq) != 0 ||
++	    vio_queue_setup(d, 1, 0, &vg.cursorq) != 0) {
+ 		printf("virtio-gpu: %s: refused\n", vio_name(d));
+ 		vio_fail(d);
+ 		return ENODEV;

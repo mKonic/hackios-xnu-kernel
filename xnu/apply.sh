@@ -27,4 +27,11 @@ git checkout -q -b redwood "$TAG"
 echo 'BUILD/' >> .git/info/exclude
 git apply --whitespace=nowarn "$HERE/redwood.patch"
 cp -a "$HERE/files/." .
-echo "apply.sh: $DIR: $TAG + $(grep -c '^diff --git' "$HERE/redwood.patch") changed and $(find "$HERE/files" -type f | wc -l) new files"
+# Numbered patches on top (xnu/patches/NNNN-*.patch, in order), kept apart from redwood.patch so
+# that work in progress on separate tracks does not conflict: 1000-1099 platform (AVF/crosvm),
+# 1100-1199 virtio-pci, 1200-1299 display and input.
+for p in "$HERE"/patches/*.patch; do
+	[ -e "$p" ] || continue
+	git apply --whitespace=nowarn "$p" || { echo "apply.sh: $(basename "$p") does not apply" >&2; false; }
+done
+echo "apply.sh: $DIR: $TAG + $(grep -c '^diff --git' "$HERE/redwood.patch") changed and $(find "$HERE/files" -type f | wc -l) new files, $(ls "$HERE"/patches/*.patch 2>/dev/null | wc -l) numbered patches"

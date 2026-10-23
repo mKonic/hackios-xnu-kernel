@@ -1,0 +1,160 @@
+diff --git a/osfmk/arm64/loader_return.c b/osfmk/arm64/loader_return.c
+index a058bb5..4aae8b6 100644
+--- a/osfmk/arm64/loader_return.c
++++ b/osfmk/arm64/loader_return.c
+@@ -24,6 +24,7 @@
+ #include <arm64/proc_reg.h>
+ #include <pexpert/pexpert.h>
+ #include <pexpert/arm64/board_config.h>
++#include <pexpert/arm/protos.h>
+ #include <vm/vm_page.h>
+ #include <vm/vm_compressor.h>
+ 
+@@ -358,6 +359,70 @@ loader_log_append_msgbuf(void)
+ 	}
+ }
+ 
++/*
++ * No loader to return to (avfboot under crosvm/AVF leaves the return slot 0): end the machine
++ * through PSCI instead, so that the VM stops and its owner sees it stop. A reboot asks for
++ * SYSTEM_RESET, a halt or a panic for SYSTEM_OFF; a panic's first line is said once more on the
++ * console just before, so that it is the last thing there. boot-arg avf_exit=0: stay, as before.
++ */
++static bool loader_exit_reset;
++
++void
++loader_exit_wanted(bool reset)
++{
++	loader_exit_reset = reset;
++}
++
++static void
++avf_console_puts(const char *s, const char *end)
++{
++	for (; *s && (end == NULL || s < end); s++) {
++		if (*s == '\n') {
++			uart_putc('\r');
++		}
++		uart_putc(*s);
++	}
++}
++
++static void
++loader_exit_without_loader(void)
++{
++	uint32_t stay_on = 1;
++	const char *panic_line = NULL, *line_end = NULL;
++
++	if (loader_stub_slot[1] != 0) {
++		return;                         /* a loader is there; it just would not have us back */
++	}
++	if (PE_parse_boot_argn("avf_exit", &stay_on, sizeof(stay_on)) && stay_on == 0) {
++		return;
++	}
++	/* the panic's own first line, from the panic buffer */
++	if (debug_buf_base != NULL && debug_buf_ptr > debug_buf_base &&
++	    (size_t)(debug_buf_ptr - debug_buf_base) < 256 * 1024) {
++		for (const char *c = debug_buf_base; c + 6 <= debug_buf_ptr; c++) {
++			if (__builtin_memcmp(c, "panic(", 6) == 0) {
++				panic_line = c;
++				for (line_end = c; line_end < debug_buf_ptr && *line_end != '\n' && *line_end; line_end++) {
++				}
++				break;
++			}
++		}
++	}
++	if (panic_line != NULL) {
++		avf_console_puts("\navf: kernel panic: ", NULL);
++		avf_console_puts(panic_line, line_end);
++		avf_console_puts("\navf: powering off (PSCI SYSTEM_OFF)\n", NULL);
++		(void)psci_system_off(false);
++	} else if (loader_exit_reset) {
++		avf_console_puts("\navf: reboot (PSCI SYSTEM_RESET)\n", NULL);
++		(void)psci_system_off(true);
++	} else {
++		avf_console_puts("\navf: halt (PSCI SYSTEM_OFF)\n", NULL);
++		(void)psci_system_off(false);
++	}
++	avf_console_puts("avf: the firmware refused to end the machine\n", NULL);
++}
++
+ void
+ loader_return(void)
+ {
+@@ -395,6 +460,7 @@ loader_return(void)
+ 		}
+ 	}
+ 	loader_jump(0, 0);
++	loader_exit_without_loader();
+ }
+ 
+ /* Bring-up aid: stop here if the loader asked for checkpoint n. */
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+index 4f540f8..c0ceb12 100644
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -735,6 +735,7 @@ ml_get_machine_mem(void)
+ }
+ 
+ extern void loader_return(void);
++extern void loader_exit_wanted(bool reset);    /* osfmk/arm64/loader_return.c */
+ extern void redwood_adreno_stop(void);
+ 
+ __attribute__((noreturn))
+@@ -750,6 +751,7 @@ halt_all_cpus(boolean_t reboot)
+ 	}
+ 	/* No platform driver powers the machine off: hand control (and the log) back to the loader. */
+ 	redwood_adreno_stop();
++	loader_exit_wanted(reboot);     /* without a loader: PSCI SYSTEM_RESET or SYSTEM_OFF */
+ 	loader_return();
+ 	while (1) {
+ 		;
+diff --git a/osfmk/arm64/psci_smp.c b/osfmk/arm64/psci_smp.c
+index 221defa..74a9b5f 100644
+--- a/osfmk/arm64/psci_smp.c
++++ b/osfmk/arm64/psci_smp.c
+@@ -112,6 +112,30 @@ psci_error(int64_t status)
+ 	return (status <= 0 && status > -(int64_t)(sizeof(names) / sizeof(names[0]))) ? names[-status] : "?";
+ }
+ 
++/*
++ * End the machine through the firmware: SYSTEM_OFF, or SYSTEM_RESET with reset. Under crosvm
++ * (AVF) either one ends the VM, and the VM's owner is told how it stopped. Returns only if the
++ * firmware refuses.
++ */
++#define PSCI_SYSTEM_OFF         0x84000008u
++#define PSCI_SYSTEM_RESET       0x84000009u
++
++int64_t
++psci_system_off(int reset)
++{
++	DTEntry chosen;
++	void const *prop;
++	unsigned int size;
++
++	/* (psci_smp_init() runs only when there are more processors to start: ask the device tree here) */
++	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) != kSuccess ||
++	    SecureDTGetProperty(chosen, "psci-method", &prop, &size) != kSuccess || size < 3) {
++		return -1;                      /* no PSCI firmware described */
++	}
++	psci_smp_hvc = strncmp((const char *)prop, "hvc", 3) == 0;
++	return psci_call(reset ? PSCI_SYSTEM_RESET : PSCI_SYSTEM_OFF, 0, 0, 0);
++}
++
+ void
+ psci_smp_init(void)
+ {
+diff --git a/osfmk/arm64/psci_smp.h b/osfmk/arm64/psci_smp.h
+index 1d9a693..a159013 100644
+--- a/osfmk/arm64/psci_smp.h
++++ b/osfmk/arm64/psci_smp.h
+@@ -21,6 +21,9 @@ extern void             psci_smp_cpu_reached(uint32_t stage);
+ extern void             psci_smp_cpu_running(void);
+ extern void             psci_smp_cpu_off(void) __dead2;
+ 
++/* PSCI SYSTEM_OFF (reset = false) or SYSTEM_RESET; returns only if the firmware refuses */
++extern int64_t          psci_system_off(int reset);
++
+ extern void             psci_smp_stop_others(void);
+ extern void             psci_smp_stop_here(void);
+ 

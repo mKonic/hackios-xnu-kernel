@@ -1,0 +1,163 @@
+diff --git a/bsd/dev/redwood_input.c b/bsd/dev/redwood_input.c
+index 8076cf0..e0ea070 100644
+--- a/bsd/dev/redwood_input.c
++++ b/bsd/dev/redwood_input.c
+@@ -107,7 +107,7 @@ count_fingers(uint32_t type, uint32_t finger)
+ }
+ 
+ static void
+-touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y, bool from_driver)
++touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y, bool from_driver, uint64_t when)
+ {
+ 	struct redwood_touch *t;
+ 
+@@ -116,7 +116,7 @@ touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y, bool from_dri
+ 		touch_head++;                   /* nobody reads: drop the oldest */
+ 	}
+ 	t = &touch_queue[touch_tail++ % TOUCH_QUEUE];
+-	t->time = mach_absolute_time();
++	t->time = when != 0 ? when : mach_absolute_time();
+ 	if (latency_lines()) {
+ 		uint64_t ns;
+ 
+@@ -137,7 +137,14 @@ touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y, bool from_dri
+ void
+ redwood_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y)
+ {
+-	touch_post(type, finger, x, y, true);
++	touch_post(type, finger, x, y, true, 0);
++}
++
++/* The same, for a sample taken at mach_absolute_time() `when` (not later than now). */
++void
++redwood_touch_post_at(uint32_t type, uint32_t finger, uint32_t x, uint32_t y, uint64_t when)
++{
++	touch_post(type, finger, x, y, true, when);
+ }
+ 
+ static int
+@@ -194,7 +201,7 @@ touch_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
+ 		if (t.type < REDWOOD_TOUCH_DOWN || t.type > REDWOOD_BUTTON_UP) {
+ 			return EINVAL;
+ 		}
+-		touch_post(t.type, t.finger, t.x, t.y, false);
++		touch_post(t.type, t.finger, t.x, t.y, false, 0);
+ 	}
+ 	return error;
+ }
+diff --git a/bsd/dev/redwood_virtio_input.c b/bsd/dev/redwood_virtio_input.c
+index 64585e9..642d589 100644
+--- a/bsd/dev/redwood_virtio_input.c
++++ b/bsd/dev/redwood_virtio_input.c
+@@ -112,6 +112,8 @@ struct input_event {
+ #define ABS_MT_POSITION_Y       0x36
+ #define ABS_MT_TRACKING_ID      0x39
+ #define MT_SLOTS                10              /* fingers told apart (the HID side takes ten) */
++#define EV_MSC                  4
++#define MSC_TIMESTAMP           5               /* microseconds of the sender's clock, wrapping */
+ 
+ /* an axis' range, 0..65535 across the display after scaling */
+ struct axis {
+@@ -137,6 +139,13 @@ struct input_device {
+ 		bool            down, moved;    /* as last posted, and changed since */
+ 	} contact[MT_SLOTS];
+ 	uint64_t                reports;        /* EV_SYN reports handled */
++	/*
++	 * The sender's time of the report being read (MSC_TIMESTAMP, the Scion app sends one), and
++	 * how it maps onto mach_absolute_time: samples read in a burst then keep their real spacing.
++	 */
++	bool                    have_ts, ts_synced;
++	uint32_t                ts_us, base_us;
++	uint64_t                base_abs, last_abs;
+ #ifdef INPUT_VIO
+ 	vio_dev_t *             vdev;
+ 	vio_queue_t *           vq;
+@@ -260,19 +269,52 @@ scale(const struct axis *a, int32_t v)
+ 	return (uint32_t)(((int64_t)v - a->min) * 65535 / span);
+ }
+ 
++/*
++ * When the report being finished was made, in mach_absolute_time, from its MSC_TIMESTAMP; 0
++ * (= now) without one. The sender's clock is mapped by the earliest-arriving report seen: a
++ * report that would map into the future moves the mapping to now, so it tracks the shortest
++ * delivery delay. A mapping more than a second off starts again. Never earlier than the previous.
++ */
++static uint64_t
++report_time(struct input_device *d)
++{
++	uint64_t now = mach_absolute_time(), t, delta, limit;
++
++	if (!d->have_ts) {
++		return 0;
++	}
++	d->have_ts = false;
++	nanoseconds_to_absolutetime((uint64_t)(uint32_t)(d->ts_us - d->base_us) * NSEC_PER_USEC, &delta);
++	nanoseconds_to_absolutetime(NSEC_PER_SEC, &limit);
++	t = d->base_abs + delta;
++	if (!d->ts_synced || t > now || now - t > limit) {
++		d->ts_synced = true;
++		d->base_us = d->ts_us;
++		d->base_abs = now;
++		t = now;
++	}
++	if (t < d->last_abs) {
++		t = d->last_abs;
++	}
++	d->last_abs = t;
++	return t;
++}
++
+ /* A whole report has come (EV_SYN): post what changed for every contact. */
+ static void
+ mt_report(struct input_device *d)
+ {
++	uint64_t when = report_time(d);
++
+ 	for (int i = 0; i < MT_SLOTS; i++) {
+ 		bool down = d->contact[i].id >= 0;
+ 
+ 		if (down && !d->contact[i].down) {
+-			redwood_touch_post(REDWOOD_TOUCH_DOWN, (uint32_t)i, d->contact[i].x, d->contact[i].y);
++			redwood_touch_post_at(REDWOOD_TOUCH_DOWN, (uint32_t)i, d->contact[i].x, d->contact[i].y, when);
+ 		} else if (down && d->contact[i].moved) {
+-			redwood_touch_post(REDWOOD_TOUCH_MOVE, (uint32_t)i, d->contact[i].x, d->contact[i].y);
++			redwood_touch_post_at(REDWOOD_TOUCH_MOVE, (uint32_t)i, d->contact[i].x, d->contact[i].y, when);
+ 		} else if (!down && d->contact[i].down) {
+-			redwood_touch_post(REDWOOD_TOUCH_UP, (uint32_t)i, d->contact[i].x, d->contact[i].y);
++			redwood_touch_post_at(REDWOOD_TOUCH_UP, (uint32_t)i, d->contact[i].x, d->contact[i].y, when);
+ 		}
+ 		d->contact[i].down = down;
+ 		d->contact[i].moved = false;
+@@ -324,12 +366,19 @@ input_event(struct input_device *d, const struct input_event *e)
+ 			redwood_touch_post(e->value ? REDWOOD_BUTTON_DOWN : REDWOOD_BUTTON_UP, button, 0, 0);
+ 		}
+ 		break;
++	case EV_MSC:
++		if (e->code == MSC_TIMESTAMP) {
++			d->ts_us = e->value;
++			d->have_ts = true;
++		}
++		break;
+ 	case EV_SYN:
+ 		d->reports++;
+ 		if (d->mt) {
+ 			mt_report(d);
+ 			break;
+ 		}
++		d->have_ts = false;
+ 		if (d->pressed && !d->touching) {
+ 			redwood_touch_post(REDWOOD_TOUCH_DOWN, 0, d->x, d->y);
+ 		} else if (d->pressed && d->moved) {
+diff --git a/bsd/sys/redwood_input.h b/bsd/sys/redwood_input.h
+index bb8ad1b..5b21eac 100644
+--- a/bsd/sys/redwood_input.h
++++ b/bsd/sys/redwood_input.h
+@@ -38,6 +38,8 @@ struct redwood_touch {
+ #ifdef KERNEL
+ /* For drivers; not from interrupt context. */
+ void redwood_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y);
++/* The same for a sample taken at mach_absolute_time() `when` (0 = now), e.g. the host's own time of a touch. */
++void redwood_touch_post_at(uint32_t type, uint32_t finger, uint32_t x, uint32_t y, uint64_t when);
+ void redwood_input_init(void);
+ void redwood_virtio_input_init(void);   /* boot-arg virtio_input=1: QEMU's virtio pointer and keyboard */
+ void redwood_goodix_init(void);         /* boot-arg touchscreen=1: the phone's Goodix or FocalTech touch screen */

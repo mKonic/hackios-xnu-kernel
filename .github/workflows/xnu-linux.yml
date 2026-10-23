@@ -1,0 +1,118 @@
+# Kernel build on GitHub's Linux runners: the same steps as README.md's "Building from source"
+# (xnu/apply.sh, xnu-deps/setup.sh, xnu-build.sh -k) on a clean Ubuntu machine.
+#
+# Output artifact "xnu-kernel": mach.development.bcm2837 (+ .unstripped), loader.efi built from
+# xnuloader/, xnuloader/mkpayload.py, and SHA256SUMS.
+# The theos toolchain (cctools for Linux) and SDK are fetched here, at build time, and are never
+# committed; so is everything xnu-deps/setup.sh downloads.
+name: xnu-linux
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, "avf/**"]
+
+concurrency:
+  group: xnu-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  THEOS: ${{ github.workspace }}/../theos
+  # theos' Linux iOS toolchain (cctools-port ld64, nm, strip, ...) and its SDK collection
+  TOOLCHAIN_URL: https://github.com/L1ghtmann/llvm-project/releases/latest/download/iOSToolchain-x86_64.tar.xz
+  SDKS_REPO: https://github.com/theos/sdks.git
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Host packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends build-essential git curl clang lld \
+            python3 perl xz-utils flex bison m4 autoconf automake libtool-bin uuid-dev llvm
+          clang --version | head -1
+          ls -la /usr/bin/dsymutil   # the kernel build runs it (xnu-deps/host/bin/xcrun -find)
+
+      - name: Cache theos toolchain and SDK
+        id: theos-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.THEOS }}
+          key: theos-iOSToolchain-x86_64-iPhoneOS16.5-v1
+
+      - name: theos (toolchain + iPhoneOS16.5.sdk)
+        if: steps.theos-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p "$THEOS/toolchain/linux/iphone" "$THEOS/sdks"
+          mkdir -p /tmp/tc && curl -L --fail --retry 3 -s "$TOOLCHAIN_URL" | tar -xJ -C /tmp/tc
+          # the archive's layout has changed over time: take the directory whose bin/ has ld
+          LD=$(find /tmp/tc -path '*/bin/ld' -type f -o -path '*/bin/ld' -type l | head -1)
+          test -n "$LD" || { find /tmp/tc -maxdepth 4 | head -50; exit 1; }
+          rm -rf "$THEOS/toolchain/linux/iphone" && mv "$(dirname "$(dirname "$LD")")" "$THEOS/toolchain/linux/iphone"
+          ls "$THEOS/toolchain/linux/iphone/bin" | head -60
+          git init -q sdks && git -C sdks remote add origin "$SDKS_REPO"
+          git -C sdks sparse-checkout set iPhoneOS16.5.sdk
+          git -C sdks fetch -q --depth 1 --filter=blob:none origin HEAD && git -C sdks checkout -q FETCH_HEAD
+          mv sdks/iPhoneOS16.5.sdk "$THEOS/sdks/"
+          rm -rf sdks
+          ls "$THEOS/sdks"
+
+      - name: Check toolchain
+        run: |
+          B=$THEOS/toolchain/linux/iphone/bin
+          ls -la "$B/ld" && "$B/ld" -v 2>&1 | head -3 || true
+          test -d "$THEOS/sdks/iPhoneOS16.5.sdk/usr/include"
+
+      - name: Cache xnu-deps sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            xnu-deps/AvailabilityVersions
+            xnu-deps/libdispatch
+            xnu-deps/libpthread
+            xnu-deps/mm_bootstrap_cmds
+            xnu-deps/tcsh
+            xnu-deps/unifdef
+            xnu-deps/MacOSX13.3.sdk
+          key: xnu-deps-src-${{ hashFiles('xnu-deps/setup.sh') }}
+
+      - name: Kernel tree (xnu/apply.sh)
+        run: xnu/apply.sh
+
+      - name: Dependencies (xnu-deps/setup.sh)
+        run: |
+          xnu-deps/setup.sh || { for f in xnu-deps/*.log; do echo "== $f"; tail -60 "$f"; done; exit 1; }
+
+      - name: Build (xnu-build.sh -k)
+        run: |
+          # -k is required: the export checks fail after the kernel is linked (xnu/README.md)
+          ./xnu-build.sh -j$(nproc) -k > build.log 2>&1 || echo "make exited with $? (expected: see xnu/README.md)"
+          grep -E '(error|Error)[: ]' build.log | grep -v 'exported name not in import list' | tail -40 || true
+          K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
+          ls -la $K $K.unstripped
+          mkdir -p out && cp $K $K.unstripped out/
+
+      - name: Loader (xnuloader/build.sh)
+        run: |
+          xnuloader/build.sh
+          cp xnuloader/loader.efi xnuloader/mkpayload.py out/
+          (cd out && sha256sum * > SHA256SUMS && cat SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xnu-build-log
+          path: |
+            build.log
+            xnu-deps/*.log
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xnu-kernel
+          path: out/
+          retention-days: 7

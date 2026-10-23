@@ -1,0 +1,470 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 9cd24b4..e1be643 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -111,6 +111,7 @@ bsd/dev/unix_startup.c			standard
+ bsd/dev/monotonic.c optional monotonic
+ bsd/dev/redwood_input.c		standard
+ bsd/dev/redwood_virtio_input.c	standard
++bsd/dev/redwood_vgpu.c		standard
+ bsd/dev/redwood_goodix.c	standard
+ bsd/dev/redwood_buttons.c	standard
+ bsd/dev/redwood_battery.c	standard
+diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
+new file mode 100644
+index 0000000..24c1f74
+--- /dev/null
++++ b/bsd/dev/redwood_vgpu.c
+@@ -0,0 +1,327 @@
++/*
++ * virtio-gpu 2D: a scanout for the display (sys/redwood_vgpu.h), on the virtio core
++ * (sys/redwood_virtio.h). Without the core this is only stubs that say ENODEV.
++ *
++ * One resource (REDWOOD_VGPU_2D_RESOURCE) in B8G8R8X8, backed by one physically contiguous
++ * buffer the kernel draws into, on scanout 0 at the size the device prefers. A frame reaches
++ * the host with TRANSFER_TO_HOST_2D (the host copies the changed rectangle from guest memory
++ * into its resource) and RESOURCE_FLUSH (it shows it). Commands go one at a time on the
++ * control queue under a mutex, each waited for: a frame is two of them.
++ */
++#include <kern/clock.h>
++#include <kern/locks.h>
++#include <libkern/libkern.h>
++#include <mach/mach_types.h>
++#include <sys/errno.h>
++#include <sys/redwood_vgpu.h>
++#include <sys/systm.h>
++#include <pexpert/pexpert.h>
++
++#if __has_include(<sys/redwood_virtio.h>)
++#include <sys/redwood_virtio.h>
++
++/* virtio 1.2, 5.7 */
++#define CMD_GET_DISPLAY_INFO            0x0100
++#define CMD_RESOURCE_CREATE_2D          0x0101
++#define CMD_SET_SCANOUT                 0x0103
++#define CMD_RESOURCE_FLUSH              0x0104
++#define CMD_TRANSFER_TO_HOST_2D         0x0105
++#define CMD_RESOURCE_ATTACH_BACKING     0x0106
++#define RESP_OK_NODATA                  0x1100
++#define RESP_OK_DISPLAY_INFO            0x1101
++#define FORMAT_B8G8R8X8_UNORM           2
++#define MAX_SCANOUTS                    16
++
++struct ctrl_hdr {
++	uint32_t type, flags;
++	uint64_t fence_id;
++	uint32_t ctx_id;
++	uint8_t ring_idx, padding[3];
++};
++struct rect {
++	uint32_t x, y, width, height;
++};
++struct resp_display_info {
++	struct ctrl_hdr hdr;
++	struct {
++		struct rect r;
++		uint32_t enabled, flags;
++	} pmodes[MAX_SCANOUTS];
++};
++struct resource_create_2d {
++	struct ctrl_hdr hdr;
++	uint32_t resource_id, format, width, height;
++};
++struct attach_backing {
++	struct ctrl_hdr hdr;
++	uint32_t resource_id, nr_entries;
++	struct {
++		uint64_t addr;
++		uint32_t length, padding;
++	} entry;                                /* one: the buffer is contiguous */
++};
++struct set_scanout {
++	struct ctrl_hdr hdr;
++	struct rect r;
++	uint32_t scanout_id, resource_id;
++};
++struct transfer_to_host_2d {
++	struct ctrl_hdr hdr;
++	struct rect r;
++	uint64_t offset;
++	uint32_t resource_id, padding;
++};
++struct resource_flush {
++	struct ctrl_hdr hdr;
++	struct rect r;
++	uint32_t resource_id, padding;
++};
++
++static LCK_GRP_DECLARE(vgpu_grp, "redwood_vgpu");
++static LCK_MTX_DECLARE(vgpu_lock, &vgpu_grp);
++
++static struct {
++	int state;                              /* 0 not tried, 1 up, -1 no device */
++	vio_dev_t *dev;
++	vio_queue_t *ctrlq;
++	uint64_t features;
++	uint8_t *cmd, *resp;                    /* device-visible bounce buffers */
++	uint64_t cmd_pa, resp_pa;
++	/* the scanout */
++	bool shown;
++	void *fb;
++	uint64_t fb_pa;
++	uint32_t width, height, stride;
++} vg;
++
++/* Under vgpu_lock. */
++static int
++vgpu_setup(void)
++{
++	vio_dev_t *d;
++	uint64_t want = VIRTIO_BIT(VIRTIO_GPU_F_VIRGL) | VIRTIO_BIT(VIRTIO_GPU_F_CONTEXT_INIT);
++
++	if (vg.state) {
++		return vg.state > 0 ? 0 : ENODEV;
++	}
++	vg.state = -1;
++	if ((d = vio_find(VIRTIO_ID_GPU, 0)) == NULL) {
++		return ENODEV;
++	}
++	if (vio_init(d, want, &vg.features) != 0 || vio_queue_setup(d, 0, 0, &vg.ctrlq) != 0) {
++		printf("virtio-gpu: %s: refused\n", vio_name(d));
++		vio_fail(d);
++		return ENODEV;
++	}
++	vg.cmd = vio_dma_alloc(REDWOOD_VGPU_CTRL_MAX, &vg.cmd_pa);
++	vg.resp = vio_dma_alloc(REDWOOD_VGPU_RESP_MAX, &vg.resp_pa);
++	if (vg.cmd == NULL || vg.resp == NULL) {
++		vio_fail(d);
++		return ENOMEM;
++	}
++	vio_queue_intr(vg.ctrlq, true);
++	vio_intr_enable(d);                     /* (or polled) */
++	vio_driver_ok(d);
++	vg.dev = d;
++	vg.state = 1;
++	printf("virtio-gpu: %s, features 0x%llx%s%s\n", vio_name(d), vg.features,
++	    vg.features & VIRTIO_BIT(VIRTIO_GPU_F_VIRGL) ? " virgl" : "",
++	    vg.features & VIRTIO_BIT(VIRTIO_GPU_F_CONTEXT_INIT) ? " context-init" : "");
++	return 0;
++}
++
++/* One command, waited for. Under vgpu_lock, device up. */
++static int
++vgpu_submit(const void *cmd, uint32_t cmd_len, void *resp, uint32_t resp_len)
++{
++	struct vio_sg sg[2] = {
++		{ vg.cmd_pa, cmd_len, false },
++		{ vg.resp_pa, resp_len, true },
++	};
++	uint32_t seq, len;
++	void *done;
++
++	if (cmd_len < sizeof(struct ctrl_hdr) || cmd_len > REDWOOD_VGPU_CTRL_MAX ||
++	    resp_len < sizeof(struct ctrl_hdr) || resp_len > REDWOOD_VGPU_RESP_MAX) {
++		return EINVAL;
++	}
++	memcpy(vg.cmd, cmd, cmd_len);
++	bzero(vg.resp, resp_len);
++	seq = vio_intr_seq(vg.dev);
++	if (vio_queue_add(vg.ctrlq, sg, 2, (void *)1) != 0) {
++		return EIO;
++	}
++	vio_queue_kick(vg.ctrlq);
++	for (int waited = 0; (done = vio_queue_get(vg.ctrlq, &len)) == NULL; waited++) {
++		if (waited >= 200) {            /* 2 s */
++			printf("virtio-gpu: command 0x%x not answered\n", ((const struct ctrl_hdr *)cmd)->type);
++			return ETIMEDOUT;
++		}
++		vio_intr_wait(vg.dev, seq, 10 * NSEC_PER_MSEC);
++		seq = vio_intr_seq(vg.dev);
++	}
++	vio_intr_isr(vg.dev);
++	memcpy(resp, vg.resp, resp_len);
++	return 0;
++}
++
++/* A command whose answer is just "OK". */
++static int
++vgpu_simple(void *cmd, uint32_t len, uint32_t type)
++{
++	struct ctrl_hdr resp;
++
++	bzero(cmd, sizeof(struct ctrl_hdr));
++	((struct ctrl_hdr *)cmd)->type = type;
++	if (vgpu_submit(cmd, len, &resp, sizeof(resp)) != 0) {
++		return EIO;
++	}
++	if (resp.type != RESP_OK_NODATA) {
++		printf("virtio-gpu: command 0x%x: answer 0x%x\n", type, resp.type);
++		return EIO;
++	}
++	return 0;
++}
++
++int
++redwood_vgpu_ctrl(const void *cmd, uint32_t cmd_len, void *resp, uint32_t resp_len)
++{
++	int error;
++
++	lck_mtx_lock(&vgpu_lock);
++	error = vgpu_setup();
++	if (error == 0) {
++		error = vgpu_submit(cmd, cmd_len, resp, resp_len);
++	}
++	lck_mtx_unlock(&vgpu_lock);
++	return error;
++}
++
++uint64_t
++redwood_vgpu_features(void)
++{
++	return vg.state > 0 ? vg.features : 0;
++}
++
++int
++redwood_vgpu_display(void **fb, uint32_t *width, uint32_t *height, uint32_t *stride)
++{
++	static struct resp_display_info info;   /* (under the lock) */
++	struct ctrl_hdr get = { .type = CMD_GET_DISPLAY_INFO };
++	struct resource_create_2d create;
++	struct attach_backing attach;
++	struct set_scanout scanout;
++	uint32_t w = 0, h = 0;
++	int error;
++
++	lck_mtx_lock(&vgpu_lock);
++	if ((error = vgpu_setup()) != 0 || vg.shown) {
++		goto out;
++	}
++	error = EIO;
++	if (vgpu_submit(&get, sizeof(get), &info, sizeof(info)) != 0 || info.hdr.type != RESP_OK_DISPLAY_INFO) {
++		goto out;
++	}
++	if (info.pmodes[0].enabled) {
++		w = info.pmodes[0].r.width;
++		h = info.pmodes[0].r.height;
++	}
++	if (!PE_parse_boot_argn("vgpu_width", &w, sizeof(w)) && w == 0) {
++		w = 1125;
++	}
++	if (!PE_parse_boot_argn("vgpu_height", &h, sizeof(h)) && h == 0) {
++		h = 2436;
++	}
++	vg.width = w;
++	vg.height = h;
++	vg.stride = w * 4;
++	vg.fb = vio_dma_alloc((size_t)vg.stride * h, &vg.fb_pa);
++	if (vg.fb == NULL) {
++		error = ENOMEM;
++		goto out;
++	}
++
++	create.resource_id = REDWOOD_VGPU_2D_RESOURCE;
++	create.format = FORMAT_B8G8R8X8_UNORM;
++	create.width = w;
++	create.height = h;
++	attach.resource_id = REDWOOD_VGPU_2D_RESOURCE;
++	attach.nr_entries = 1;
++	attach.entry.addr = vg.fb_pa;
++	attach.entry.length = vg.stride * h;
++	attach.entry.padding = 0;
++	scanout.r = (struct rect){ 0, 0, w, h };
++	scanout.scanout_id = 0;
++	scanout.resource_id = REDWOOD_VGPU_2D_RESOURCE;
++	if (vgpu_simple(&create, sizeof(create), CMD_RESOURCE_CREATE_2D) != 0 ||
++	    vgpu_simple(&attach, sizeof(attach), CMD_RESOURCE_ATTACH_BACKING) != 0 ||
++	    vgpu_simple(&scanout, sizeof(scanout), CMD_SET_SCANOUT) != 0) {
++		goto out;
++	}
++	vg.shown = true;
++	printf("virtio-gpu: scanout 0 is %ux%u at 0x%llx\n", w, h, vg.fb_pa);
++	error = 0;
++out:
++	if (vg.shown) {
++		*fb = vg.fb;
++		*width = vg.width;
++		*height = vg.height;
++		*stride = vg.stride;
++		error = 0;
++	}
++	lck_mtx_unlock(&vgpu_lock);
++	return error;
++}
++
++int
++redwood_vgpu_flush(uint32_t x, uint32_t y, uint32_t width, uint32_t height)
++{
++	struct transfer_to_host_2d transfer;
++	struct resource_flush flush;
++	int error = ENODEV;
++
++	lck_mtx_lock(&vgpu_lock);
++	if (vg.shown) {
++		transfer.r = (struct rect){ x, y, width, height };
++		transfer.offset = (uint64_t)y * vg.stride + (uint64_t)x * 4;
++		transfer.resource_id = REDWOOD_VGPU_2D_RESOURCE;
++		transfer.padding = 0;
++		flush.r = transfer.r;
++		flush.resource_id = REDWOOD_VGPU_2D_RESOURCE;
++		flush.padding = 0;
++		error = vgpu_simple(&transfer, sizeof(transfer), CMD_TRANSFER_TO_HOST_2D);
++		if (error == 0) {
++			error = vgpu_simple(&flush, sizeof(flush), CMD_RESOURCE_FLUSH);
++		}
++	}
++	lck_mtx_unlock(&vgpu_lock);
++	return error;
++}
++
++#else /* no virtio core in this kernel */
++
++int
++redwood_vgpu_display(__unused void **fb, __unused uint32_t *width, __unused uint32_t *height, __unused uint32_t *stride)
++{
++	return ENODEV;
++}
++
++int
++redwood_vgpu_flush(__unused uint32_t x, __unused uint32_t y, __unused uint32_t width, __unused uint32_t height)
++{
++	return ENODEV;
++}
++
++int
++redwood_vgpu_ctrl(__unused const void *cmd, __unused uint32_t cmd_len, __unused void *resp, __unused uint32_t resp_len)
++{
++	return ENODEV;
++}
++
++uint64_t
++redwood_vgpu_features(void)
++{
++	return 0;
++}
++
++#endif
+diff --git a/bsd/sys/redwood_vgpu.h b/bsd/sys/redwood_vgpu.h
+new file mode 100644
+index 0000000..6d3db5b
+--- /dev/null
++++ b/bsd/sys/redwood_vgpu.h
+@@ -0,0 +1,54 @@
++/*
++ * virtio-gpu, 2D: a scanout the kernel draws into, for hosts that show one (QEMU with
++ * -device virtio-gpu-pci, crosvm with a display). Under the Android Virtualization Framework a
++ * sideloaded app cannot see crosvm's display, so there the boot framebuffer is the Scion shared
++ * framebuffer instead (avfboot, scfb.*); this is the other way to the screen.
++ *
++ * MiniIOMobileFramebuffer uses it when the loader left no framebuffer: redwood_vgpu_display()
++ * makes resource 1 (B8G8R8X8, what iOS draws) backed by contiguous guest memory and puts it on
++ * scanout 0, and after every frame redwood_vgpu_flush() sends TRANSFER_TO_HOST_2D and
++ * RESOURCE_FLUSH.
++ *
++ * For 3D on top (bsd/dev/redwood_vgpu3d.c): the 2D driver negotiates VIRTIO_GPU_F_VIRGL and
++ * VIRTIO_GPU_F_CONTEXT_INIT when offered (it doesn't change 2D), keeps resource IDs below
++ * REDWOOD_VGPU_3D_FIRST_ID, and lets anyone put one command at a time on the control queue
++ * through redwood_vgpu_ctrl().
++ */
++#ifndef _SYS_REDWOOD_VGPU_H_
++#define _SYS_REDWOOD_VGPU_H_
++
++#include <stdint.h>
++#include <sys/cdefs.h>
++
++__BEGIN_DECLS
++
++#define VIRTIO_GPU_F_VIRGL              0
++#define VIRTIO_GPU_F_EDID               1
++#define VIRTIO_GPU_F_RESOURCE_UUID      2
++#define VIRTIO_GPU_F_RESOURCE_BLOB      3
++#define VIRTIO_GPU_F_CONTEXT_INIT       4
++
++#define REDWOOD_VGPU_2D_RESOURCE        1               /* the scanout's */
++#define REDWOOD_VGPU_3D_FIRST_ID        0x10000         /* 3D allocates from here up */
++#define REDWOOD_VGPU_CTRL_MAX           65536           /* largest command for redwood_vgpu_ctrl */
++#define REDWOOD_VGPU_RESP_MAX           4096            /* largest response */
++
++/*
++ * The scanout, set up on first call: its memory (kernel address), size and bytes per row.
++ * 0, ENODEV (no virtio-gpu or no virtio core), ENOMEM, or EIO (the device said no).
++ */
++int redwood_vgpu_display(void **fb, uint32_t *width, uint32_t *height, uint32_t *stride);
++/* The rectangle changed: copy it to the host's resource and show it. 0 or EIO. */
++int redwood_vgpu_flush(uint32_t x, uint32_t y, uint32_t width, uint32_t height);
++/*
++ * One command on the control queue, waited for: cmd (starting with struct virtio_gpu_ctrl_hdr)
++ * is copied to device-visible memory, the response (resp_len bytes at most) back. Serialized
++ * with the 2D driver's own commands; may sleep. 0, EINVAL (too long), ENODEV, or ETIMEDOUT.
++ */
++int redwood_vgpu_ctrl(const void *cmd, uint32_t cmd_len, void *resp, uint32_t resp_len);
++/* Device features negotiated (VIRTIO_GPU_F_* bits); 0 before the device is set up. */
++uint64_t redwood_vgpu_features(void);
++
++__END_DECLS
++
++#endif /* _SYS_REDWOOD_VGPU_H_ */
+diff --git a/iokit/Kernel/MiniIOMobileFramebuffer.cpp b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+index 95e5dc6..57ce40a 100644
+--- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -72,6 +72,14 @@ struct scfb_header {
+ 	uint64_t        host_reading;
+ 	uint64_t        host_ns;
+ };
++/*
++ * virtio-gpu 2D (bsd/dev/redwood_vgpu.c): the panel when the loader left no framebuffer, e.g.
++ * QEMU with -device virtio-gpu-pci and no ramfb. Each frame is then sent with redwood_vgpu_flush.
++ */
++extern "C" int redwood_vgpu_display(void ** fb, uint32_t * width, uint32_t * height, uint32_t * stride);
++extern "C" int redwood_vgpu_flush(uint32_t x, uint32_t y, uint32_t width, uint32_t height);
++static bool gVGPU;
++
+ static TUNABLE(uint64_t, gSCFBAddr, "scfb.addr", 0);
+ static volatile struct scfb_header * gSCFB;
+ extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -473,10 +481,17 @@ IOMobileFramebuffer::start(IOService * provider)
+ 	if (!IOService::start(provider)) {
+ 		return false;
+ 	}
++	void * vgpuFB = NULL;
++	uint32_t vgpuWidth = 0, vgpuHeight = 0, vgpuStride = 0;
++
+ 	if (vinfo.v_baseaddr == 0 || vinfo.v_width == 0 || vinfo.v_height == 0 || vinfo.v_depth != 32) {
+-		IOLog("MiniIOMobileFramebuffer: no usable boot framebuffer (%ux%u, depth %u)\n", vinfo.v_width, vinfo.v_height,
+-		    vinfo.v_depth);
+-		return false;
++		if (redwood_vgpu_display(&vgpuFB, &vgpuWidth, &vgpuHeight, &vgpuStride) != 0) {
++			IOLog("MiniIOMobileFramebuffer: no usable boot framebuffer (%ux%u, depth %u), and no virtio-gpu\n",
++			    vinfo.v_width, vinfo.v_height, vinfo.v_depth);
++			return false;
++		}
++		gVGPU = true;
++		IOLog("MiniIOMobileFramebuffer: the panel is virtio-gpu's scanout, %ux%u\n", vgpuWidth, vgpuHeight);
+ 	}
+ 	fLock = IOLockAlloc();
+ 	fSwapLock = IOLockAlloc();
+@@ -496,10 +511,10 @@ IOMobileFramebuffer::start(IOService * provider)
+ 		thread_set_thread_name(thread, "frames to the panel: a helper");
+ 		thread_deallocate(thread);
+ 	}
+-	fBase = (uint8_t *) vinfo.v_baseaddr;
+-	fPanelWidth = vinfo.v_width;
+-	fPanelHeight = vinfo.v_height;
+-	fRowBytes = vinfo.v_rowbytes;
++	fBase = gVGPU ? (uint8_t *) vgpuFB : (uint8_t *) vinfo.v_baseaddr;
++	fPanelWidth = gVGPU ? vgpuWidth : vinfo.v_width;
++	fPanelHeight = gVGPU ? vgpuHeight : vinfo.v_height;
++	fRowBytes = gVGPU ? vgpuStride : vinfo.v_rowbytes;
+ 	fWidth = gFBWidth ? gFBWidth : fPanelWidth;
+ 	fHeight = gFBHeight ? gFBHeight : fPanelHeight;
+ 	if (gFBScale != 0 && gFBScale != kFBDefaultScale) {
+@@ -1121,6 +1136,9 @@ IOMobileFramebuffer::show(const uint8_t * swap, MiniIOSurface ** surfaces)
+ 	}
+ 	drawn = mach_absolute_time();
+ 	scfbPublish(fPanelWidth, fPanelHeight);
++	if (gVGPU) {
++		redwood_vgpu_flush(0, 0, fPanelWidth, fPanelHeight);
++	}
+ 	if (recorded != NULL) {
+ 		record(recorded);
+ 	}
