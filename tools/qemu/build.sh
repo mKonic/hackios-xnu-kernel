@@ -4,6 +4,8 @@
 #   0001  rutabaga keeps one picture per scanout: moving the scanout to another resource of its size only
 #         notes it, a flush of the shown resource reads into that picture (no placeholder, no frames
 #         dropped by the D-Bus display at every move: kernel patch 1303 moves it every frame)
+#   0002  helper_lookup_tb_ptr tries the jump cache with the state's fields, not a copy of the whole state
+#         (a store-forwarding stall on every lookup; iOS's indirect calls and returns make lookups common)
 # Needs what the distribution's QEMU needs to build, with rutabaga-ffi (its gfxstream) and meson.
 set -e
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
