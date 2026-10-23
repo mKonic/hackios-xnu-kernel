@@ -99,6 +99,8 @@ fi
 GPU=(-device ramfb)
 if [ -n "$QEMU_GPU" ] && [ "$QEMU_GPU" != 0 ]; then
 	GPU+=(-device virtio-gpu-rutabaga-device,x-gfxstream-gles=on,hostmem=256M)
+	# QEMU_GPU=panel: no ramfb, the GPU's scanout is the panel (the kernel's virtio-gpu 2D path)
+	[ "$QEMU_GPU" = panel ] && GPU=(-device virtio-gpu-rutabaga-device,x-gfxstream-gles=on,hostmem=256M,xres=1125,yres=2436)
 	unset WAYLAND_DISPLAY DISPLAY
 fi
 # EMU_QMP=<socket>: shown by the emulator (qemu/emu.sh), which attaches as QEMU's D-Bus display over QMP
