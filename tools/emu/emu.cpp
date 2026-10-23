@@ -305,7 +305,10 @@ void Emu::load_icons() {
 void Emu::update_texture() {
 	emu::Scanout& s = link.scanout();
 	drawn_serial = s.serial;
-	have_frame = s.enabled && s.width;
+	// Only a picture of the panel's shape is the phone's: before the guest has one (the loader and the
+	// early kernel with the GPU's scanout as the panel) QEMU shows its "Display output is not active."
+	// placeholder, 640 x 480; the screen stays dark instead, as a phone's does while it starts.
+	have_frame = s.enabled && s.width && uint64_t(s.width) * uint64_t(kScreenH) == uint64_t(s.height) * uint64_t(kScreenW);
 	if (!have_frame) return;
 	glBindTexture(GL_TEXTURE_2D, screen_tex);
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
