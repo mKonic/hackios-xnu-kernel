@@ -17,9 +17,11 @@ chmod u+w vars.fd 2>/dev/null   # a copy from a read-only store (Nix) stays read
 # the one built here, or else the one that comes with the repository
 L=../xnuloader/loader.efi; [ -f $L ] || L=../prebuilt/loader.efi
 mkdir -p esp/EFI/BOOT && cp -u $L esp/EFI/BOOT/BOOTAA64.EFI
+# the QEMU built here with HackiOS's patches (tools/qemu/build.sh), else the system's; QEMU_BIN to choose
+QEMU_BIN=${QEMU_BIN:-$( [ -x ../out/qemu/bin/qemu-system-aarch64 ] && echo ../out/qemu/bin/qemu-system-aarch64 || echo qemu-system-aarch64)}
 # T=0: no time limit
 [ "$T" = 0 ] && TIMEOUT=() || TIMEOUT=(timeout --foreground "$T")
-"${TIMEOUT[@]}" qemu-system-aarch64 -M virt,gic-version=3 -cpu cortex-a76 -smp ${QEMU_SMP:-1} -m ${QEMU_MEM:-6G} \
+"${TIMEOUT[@]}" "$QEMU_BIN" -M virt,gic-version=3 -cpu cortex-a76 -smp ${QEMU_SMP:-1} -m ${QEMU_MEM:-6G} \
   -accel tcg,tb-size=${QEMU_TB_MB:-2048} \
   -drive if=pflash,format=raw,readonly=on,file="$EFI" \
   -drive if=pflash,format=raw,file=vars.fd \

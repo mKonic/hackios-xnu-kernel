@@ -15,7 +15,9 @@ export QEMU_VAR=${QEMU_VAR:-1}
 # CoreAnimation draws with the host's GPU (run-ios.sh QEMU_GPU, boot-arg gl=1) where QEMU has gfxstream;
 # QEMU_GPU=0 for its software renderer
 if [ -z "$QEMU_GPU" ] && qemu-system-aarch64 -device help 2>/dev/null | grep -q '"virtio-gpu-rutabaga-device"'; then
-	export QEMU_GPU=1      # (not panel: QEMU shows "Display output is not active." each time the scanout moves)
+	# the GPU's frames shown as they are with the QEMU built here (tools/qemu/build.sh: the distribution's
+	# puts "Display output is not active." up at every move of the scanout, a flicker); else through ramfb
+	[ -x out/qemu/bin/qemu-system-aarch64 ] && export QEMU_GPU=panel || export QEMU_GPU=1
 fi
 [ -n "$QEMU_GPU" ] && [ "$QEMU_GPU" != 0 ] && [[ " $CMDLINE " != *" gl="* ]] && export CMDLINE="gl=1 $CMDLINE"
 exec $E --secs "$SECS" -- "$@"

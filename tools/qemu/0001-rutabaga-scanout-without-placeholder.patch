@@ -1,0 +1,46 @@
+--- a/hw/display/virtio-gpu-rutabaga.c	2026-10-23 16:41:04.836448926 +0300
++++ b/hw/display/virtio-gpu-rutabaga.c	2026-10-23 16:41:04.856449385 +0300
+@@ -265,7 +265,12 @@
+         }
+     }
+ 
+-    if (!found) {
++    /*
++     * HackiOS: a resource that has never been on a scanout has no picture to read into; one that is
++     * not on it now is read all the same (it goes on next, with its new frame: see set_scanout) but
++     * the display is only told about the one it shows, and only of the flushed rectangle.
++     */
++    if (!found || !res->image) {
+         return;
+     }
+ 
+@@ -283,7 +288,11 @@
+                                              rf.resource_id, &transfer,
+                                              &transfer_iovec);
+     CHECK(!result, cmd);
+-    qemu_console_update_full(scanout->con);
++    if (scanout->resource_id == rf.resource_id) {
++        uint32_t x = MIN(rf.r.x, res->width), y = MIN(rf.r.y, res->height);
++        qemu_console_update(scanout->con, x, y, MIN(rf.r.width, res->width - x),
++                            MIN(rf.r.height, res->height - y));
++    }
+ }
+ 
+ static void
+@@ -336,10 +345,14 @@
+ 
+     vb->enable = 1;
+ 
+-    /* realloc the surface ptr */
++    /*
++     * realloc the surface ptr. HackiOS: straight from one picture to the next -- through NULL, the
++     * console put up its "Display output is not active." placeholder for an instant, and a guest that
++     * shows its frames in turn from two resources made every frame flicker
++     */
+     scanout->ds = qemu_create_displaysurface_pixman(res->image);
+-    qemu_console_set_surface(scanout->con, NULL);
+     qemu_console_set_surface(scanout->con, scanout->ds);
++    scanout->resource_id = ss.resource_id;
+     res->scanout_bitmask = ss.scanout_id;
+ }
+ 
