@@ -1,0 +1,278 @@
+diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
+--- a/bsd/dev/redwood_vgpu.c
++++ b/bsd/dev/redwood_vgpu.c
+@@ -90,6 +90,7 @@
+ 	uint64_t cmd_pa, resp_pa;
+ 	/* the scanout */
+ 	bool shown;
++	uint32_t scanout_res;                   /* the resource on scanout 0: ours, or a 3D one (redwood_vgpu_show) */
+ 	void *fb;
+ 	uint64_t fb_pa;
+ 	uint32_t width, height, stride;
+@@ -281,6 +282,7 @@
+ 		goto out;
+ 	}
+ 	vg.shown = true;
++	vg.scanout_res = REDWOOD_VGPU_2D_RESOURCE;
+ 	printf("virtio-gpu: scanout 0 is %ux%u at 0x%llx\n", w, h, vg.fb_pa);
+ 	error = 0;
+ out:
+@@ -303,6 +305,14 @@
+ 	int error = ENODEV;
+ 
+ 	lck_mtx_lock(&vgpu_lock);
++	if (vg.shown && vg.scanout_res != REDWOOD_VGPU_2D_RESOURCE) {
++		/* a 3D resource was shown last (redwood_vgpu_show): ours again */
++		struct set_scanout scanout = { .r = { 0, 0, vg.width, vg.height }, .scanout_id = 0,
++			                       .resource_id = REDWOOD_VGPU_2D_RESOURCE };
++		if (vgpu_simple(&scanout, sizeof(scanout), CMD_SET_SCANOUT) == 0) {
++			vg.scanout_res = REDWOOD_VGPU_2D_RESOURCE;
++		}
++	}
+ 	if (vg.shown) {
+ 		transfer.r = (struct rect){ x, y, width, height };
+ 		transfer.offset = (uint64_t)y * vg.stride + (uint64_t)x * 4;
+@@ -320,6 +330,33 @@
+ 	return error;
+ }
+ 
++int
++redwood_vgpu_show(uint32_t resource, uint32_t width, uint32_t height)
++{
++	struct resource_flush flush;
++	int error = ENODEV;
++
++	lck_mtx_lock(&vgpu_lock);
++	if (vg.shown && width == vg.width && height == vg.height) {
++		error = 0;
++		if (vg.scanout_res != resource) {
++			struct set_scanout scanout = { .r = { 0, 0, width, height }, .scanout_id = 0, .resource_id = resource };
++			error = vgpu_simple(&scanout, sizeof(scanout), CMD_SET_SCANOUT);
++			if (error == 0) {
++				vg.scanout_res = resource;
++			}
++		}
++		if (error == 0) {
++			flush.r = (struct rect){ 0, 0, width, height };
++			flush.resource_id = resource;
++			flush.padding = 0;
++			error = vgpu_simple(&flush, sizeof(flush), CMD_RESOURCE_FLUSH);
++		}
++	}
++	lck_mtx_unlock(&vgpu_lock);
++	return error;
++}
++
+ #else /* no virtio core in this kernel */
+ 
+ int
+@@ -333,6 +370,12 @@
+ {
+ 	return ENODEV;
+ }
++
++int
++redwood_vgpu_show(__unused uint32_t resource, __unused uint32_t width, __unused uint32_t height)
++{
++	return ENODEV;
++}
+ 
+ int
+ redwood_vgpu_ctrl(__unused const void *cmd, __unused uint32_t cmd_len, __unused void *resp, __unused uint32_t resp_len)
+diff --git a/bsd/dev/redwood_vgpu3d_xnu.c b/bsd/dev/redwood_vgpu3d_xnu.c
+--- a/bsd/dev/redwood_vgpu3d_xnu.c
++++ b/bsd/dev/redwood_vgpu3d_xnu.c
+@@ -55,6 +55,11 @@
+ #define VGPU3D_IOC_UNREF        _IOW('G', 2, uint32_t)
+ #define VGPU3D_IOC_UPLOAD       _IOW('G', 3, struct vgpu3d_ioc_xfer)
+ #define VGPU3D_IOC_DOWNLOAD     _IOW('G', 4, struct vgpu3d_ioc_xfer)
++/* this colour buffer is IOSurface `sid`: the display may show it as it is (redwood_vgpu3d_show) */
++struct vgpu3d_ioc_name {
++	uint32_t res, sid;
++};
++#define VGPU3D_IOC_NAME         _IOW('G', 5, struct vgpu3d_ioc_name)
+ 
+ #define MAX_OPENS               32
+ #define MAX_RES                 64
+@@ -162,9 +167,70 @@
+ 	return NULL;
+ }
+ 
++/* ---- the display: colour buffers that are IOSurfaces ------------------------------------- */
++
++#define MAX_NAMED               16
++static struct {
++	uint32_t sid, res, width, height;
++} named[MAX_NAMED];                             /* (under vgpu3d_opens_lock) */
++
++static void
++named_forget(uint32_t res)
++{
++	lck_mtx_lock(&vgpu3d_opens_lock);
++	for (int i = 0; i < MAX_NAMED; i++) {
++		if (named[i].res == res) {
++			bzero(&named[i], sizeof(named[i]));
++		}
++	}
++	lck_mtx_unlock(&vgpu3d_opens_lock);
++}
++
++static int
++res_name(struct vopen *o, const struct vgpu3d_ioc_name *n)
++{
++	struct res *r = res_find(o, n->res);
++	int slot = -1;
++
++	if (r == NULL || n->sid == 0) {
++		return ENOENT;
++	}
++	lck_mtx_lock(&vgpu3d_opens_lock);
++	for (int i = 0; i < MAX_NAMED; i++) {
++		if (named[i].sid == n->sid || named[i].res == n->res) {
++			bzero(&named[i], sizeof(named[i]));
++		}
++		slot = slot < 0 && named[i].sid == 0 ? i : slot;
++	}
++	if (slot >= 0) {
++		named[slot].sid = n->sid;
++		named[slot].res = r->id;
++		named[slot].width = r->width;
++		named[slot].height = r->height;
++	}
++	lck_mtx_unlock(&vgpu3d_opens_lock);
++	return slot >= 0 ? 0 : ENOSPC;
++}
++
++int
++redwood_vgpu3d_show(uint32_t sid)
++{
++	uint32_t res = 0, width = 0, height = 0;
++
++	lck_mtx_lock(&vgpu3d_opens_lock);
++	for (int i = 0; sid && i < MAX_NAMED; i++) {
++		if (named[i].sid == sid) {
++			res = named[i].res, width = named[i].width, height = named[i].height;
++		}
++	}
++	lck_mtx_unlock(&vgpu3d_opens_lock);
++	return res ? redwood_vgpu_show(res, width, height) : ENOENT;
++}
++
+ static void
+ res_free(struct vopen *o, struct res *r)
+ {
++	named_forget(r->id);
+ 	vgpu3d_resource_unref(&o->g, r->id);
+ 	o->g.err = 0;
+ 	kmem_free(kernel_map, r->va, r->size);
+@@ -452,6 +518,9 @@
+ 	case VGPU3D_IOC_DOWNLOAD:
+ 		err = res_xfer(o, (struct vgpu3d_ioc_xfer *)data, false);
+ 		break;
++	case VGPU3D_IOC_NAME:
++		err = res_name(o, (struct vgpu3d_ioc_name *)data);
++		break;
+ 	default:
+ 		err = ENOTTY;
+ 		break;
+diff --git a/bsd/sys/redwood_vgpu.h b/bsd/sys/redwood_vgpu.h
+--- a/bsd/sys/redwood_vgpu.h
++++ b/bsd/sys/redwood_vgpu.h
+@@ -41,6 +41,16 @@
+ /* The rectangle changed: copy it to the host's resource and show it. 0 or EIO. */
+ int redwood_vgpu_flush(uint32_t x, uint32_t y, uint32_t width, uint32_t height);
+ /*
++ * Show a 3D resource of the panel's size on the scanout instead (a colour buffer the host has drawn,
++ * no copy in the guest); the next redwood_vgpu_flush puts the 2D resource back. 0, ENODEV, or EIO.
++ */
++int redwood_vgpu_show(uint32_t resource, uint32_t width, uint32_t height);
++/*
++ * The colour buffer /dev/vgpu3d's user named after IOSurface `sid` (VGPU3D_IOC_NAME), shown with
++ * redwood_vgpu_show: 0, or ENOENT when there is none (bsd/dev/redwood_vgpu3d_xnu.c).
++ */
++int redwood_vgpu3d_show(uint32_t sid);
++/*
+  * One command on the control queue, waited for: cmd (starting with struct virtio_gpu_ctrl_hdr)
+  * is copied to device-visible memory, the response (resp_len bytes at most) back. Serialized
+  * with the 2D driver's own commands; may sleep. 0, EINVAL (too long), ENODEV, or ETIMEDOUT.
+diff --git a/iokit/Kernel/MiniIOMobileFramebuffer.cpp b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+--- a/iokit/Kernel/MiniIOMobileFramebuffer.cpp
++++ b/iokit/Kernel/MiniIOMobileFramebuffer.cpp
+@@ -81,6 +81,8 @@
+  */
+ extern "C" int redwood_vgpu_display(void ** fb, uint32_t * width, uint32_t * height, uint32_t * stride);
+ extern "C" int redwood_vgpu_flush(uint32_t x, uint32_t y, uint32_t width, uint32_t height);
++/* a surface the host's GPU drew, shown as the colour buffer it is (bsd/dev/redwood_vgpu3d_xnu.c) */
++extern "C" int redwood_vgpu3d_show(uint32_t sid);
+ static bool gVGPU;
+ 
+ static TUNABLE(uint64_t, gSCFBAddr, "scfb.addr", 0);
+@@ -388,6 +390,7 @@
+ 	uint64_t        fStatWaiting;           /* how long frames waited for the GPU here */
+ 	/* how the display is doing: frames and time spent drawing them here since fStatSince */
+ 	uint32_t        fStatFrames;
++	uint32_t        fStatDirect;            /* of them, shown as the host's colour buffer (virtio-gpu, no copy) */
+ 	uint64_t        fStatSince, fStatDrawing;
+ 	/* ... and how evenly: the time from each frame to the next, counted by the millisecond (the last count: longer) */
+ 	uint64_t        fLastFrame;
+@@ -1114,8 +1117,35 @@
+ 		    swapWord(swap, SWAP_ID), fSwapsShown, swapWord(swap, SWAP_SURFACE(0)), swapWord(swap, SWAP_SURFACE(1)),
+ 		    swapWord(swap, SWAP_SURFACE(2)), swapWord(swap, SWAP_SURFACE(3)), set, swapWord(swap, SWAP_LAYERS_CLEARED));
+ 	}
++	/*
++	 * One layer over the whole panel, unscaled, of a surface the host's GPU drew (gfxstream, the
++	 * colour buffer named after it on /dev/vgpu3d): virtio-gpu shows that buffer itself, and nothing
++	 * is copied in the guest -- not into the panel's memory, not to the host.
++	 */
++	bool direct = false;
++	if (gVGPU && !fDiff && surfaces[0] != NULL && swapWord(swap, SWAP_SURFACE(1)) == 0 &&
++	    swapWord(swap, SWAP_SURFACE(2)) == 0 && swapWord(swap, SWAP_SURFACE(3)) == 0) {
++		MiniIOSurface * s = surfaces[0];
++		int32_t src[4], dst[4];
++
++		memcpy(src, swap + SWAP_SOURCE(0), sizeof(src));
++		memcpy(dst, swap + SWAP_DEST(0), sizeof(dst));
++		direct = s->info.width == fPanelWidth && s->info.height == fPanelHeight && fWidth == fPanelWidth &&
++		    fHeight == fPanelHeight && src[0] == 0 && src[1] == 0 && src[2] == (int32_t) fPanelWidth &&
++		    src[3] == (int32_t) fPanelHeight && dst[0] == 0 && dst[1] == 0 && dst[2] == (int32_t) fPanelWidth &&
++		    dst[3] == (int32_t) fPanelHeight && redwood_vgpu3d_show(swapWord(swap, SWAP_SURFACE(0))) == 0;
++		if (direct) {
++			layers = 1;
++			recorded = s;
++			fStatDirect++;
++			if (!fGraphics) {
++				fGraphics = true;
++				PE_initialize_console(NULL, kPEGraphicsMode);
++			}
++		}
++	}
+ 	scfbBeginDraw();
+-	for (unsigned layer = 0; layer < SWAP_LAYERS; layer++) {
++	for (unsigned layer = 0; !direct && layer < SWAP_LAYERS; layer++) {
+ 		uint32_t sid = swapWord(swap, SWAP_SURFACE(layer));
+ 		int32_t src[4], dst[4];
+ 		MiniIOSurface * s;
+@@ -1165,7 +1195,7 @@
+ 	}
+ 	drawn = mach_absolute_time();
+ 	scfbPublish(fPanelWidth, fPanelHeight);
+-	if (gVGPU) {
++	if (gVGPU && !direct) {
+ 		redwood_vgpu_flush(0, 0, fPanelWidth, fPanelHeight);
+ 	}
+ 	if (recorded != NULL) {
+@@ -1199,10 +1229,11 @@
+ 		absolutetime_to_nanoseconds(fStatBeatWait, &beat);
+ 		IOLog("MiniIOMobileFramebuffer: %u frames in %llu ms (%llu a second), %llu us each in the driver, after %llu us "
+ 		    "waiting for the GPU and, %u of them, %llu us for the next refresh; %u swaps waited for the frame before, "
+-		    "%u gave up; %u swaps came a refresh late themselves\n", fStatFrames, nanos / NSEC_PER_MSEC,
+-		    fStatFrames * NSEC_PER_SEC / nanos, drawing / fStatFrames / NSEC_PER_USEC,
++		    "%u gave up; %u swaps came a refresh late themselves; %u shown as the GPU's own buffer\n", fStatFrames,
++		    nanos / NSEC_PER_MSEC, fStatFrames * NSEC_PER_SEC / nanos, drawing / fStatFrames / NSEC_PER_USEC,
+ 		    waiting / fStatFrames / NSEC_PER_USEC, fStatOnBeat, fStatOnBeat ? beat / fStatOnBeat / NSEC_PER_USEC : 0,
+-		    fStatHeld, fStatLost, fStatSwapsLate);
++		    fStatHeld, fStatLost, fStatSwapsLate, fStatDirect);
++		fStatDirect = 0;
+ 		fStatSwapsLate = 0;
+ 		for (different = 0; different < 8 && fStatSurfaces[different] != 0; different++) {
+ 		}
