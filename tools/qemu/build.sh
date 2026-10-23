@@ -6,6 +6,8 @@
 #         dropped by the D-Bus display at every move: kernel patch 1303 moves it every frame)
 #   0002  helper_lookup_tb_ptr tries the jump cache with the state's fields, not a copy of the whole state
 #         (a store-forwarding stall on every lookup; iOS's indirect calls and returns make lookups common)
+#   0003  exit without the libraries' destructors (gfxstream's sync thread crashed in an unloading EGL at
+#         every exit, with a core dump of the guest's memory each time)
 # Needs what the distribution's QEMU needs to build, with rutabaga-ffi (its gfxstream) and meson.
 set -e
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
