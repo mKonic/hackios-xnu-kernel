@@ -1,0 +1,8 @@
+*.sh text eol=lf
+*.py text eol=lf
+*.patch text eol=lf
+# Unified-diff context prefixes add a space before source indentation tabs.
+*.patch whitespace=-space-before-tab
+*.yml text eol=lf
+*.c text eol=lf
+*.h text eol=lf
