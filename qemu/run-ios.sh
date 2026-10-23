@@ -112,6 +112,11 @@ fi
 GPU=(-device ramfb)
 if [ -n "$QEMU_GPU" ] && [ "$QEMU_GPU" != 0 ]; then
 	GPU+=(-device virtio-gpu-rutabaga-device,x-gfxstream-gles=on,hostmem=256M)
+	# ... and CoreAnimation on it (gl=1), unless CMDLINE says otherwise: without, the window server keeps its
+	# software renderer and the GPU only serves test programs, a different machine from the skin's
+	[[ " $CMDLINE " != *" gl="* ]] && CMDLINE="gl=1 $CMDLINE"
+	[ -f userland/root/lib/libredwood-gl.dylib ] ||
+		echo "run-ios.sh: userland was built without the GPU library (GL=gfx userland/build.sh): software rendering" >&2
 	# QEMU_GPU=panel: no ramfb, the GPU's scanout is the panel: a frame CoreAnimation drew on the GPU is
 	# shown as the colour buffer it is (patch 1303), no copy in the guest. Needs the QEMU of tools/qemu/build.sh:
 	# the distribution's rutabaga puts its "Display output is not active." placeholder up at every move of
