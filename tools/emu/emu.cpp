@@ -3,7 +3,7 @@
 // display), the left mouse button is a finger on the guest's virtio tablet, and the toolbar's
 // buttons press the phone's buttons as keys on its virtio keyboard.
 //
-//   emu [--secs N] [--name NAME] [-- extra qemu args...]
+//   emu [--secs N] [--name NAME] [-- extra qemu args...]     (--secs: a time limit; none by default)
 //
 // The host keyboard reaches the guest too: H home, L lock, Up/Down volume, F11 five fingers, and
 // F12 NAME Enter for the live stacks of a process (see the kernel's redwood_virtio_input.c).
@@ -205,7 +205,7 @@ struct Emu {
 	emu::QemuLink link;
 	pid_t qemu = -1;
 	std::string name = "emu";
-	int secs = 3600;
+	int secs = 0;  // 0: until the window is closed
 	std::vector<std::string> qemu_args;
 	std::string dir() const { return std::string(HACKIOS_ROOT) + "/out/emu/run/" + name; }
 

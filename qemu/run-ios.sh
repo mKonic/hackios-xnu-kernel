@@ -2,7 +2,7 @@
 # Boot the whole system under QEMU: the big system image preloaded at the loader's resident
 # address (it becomes /dev/md0, the root) and the small image in the payload (/dev/md1), the
 # same arrangement `xl ramdisk` + `xl run` make on the phone.
-# usage: run-ios.sh [seconds] [extra qemu args...]
+# usage: run-ios.sh [seconds] [extra qemu args...]      (seconds 0: no time limit)
 #
 # Counting anything in the log this writes: every console line comes out TWICE, the second copy in a
 # block replayed some thousands of lines later (take any launchd line and grep -n it). So `grep -c` gives
@@ -90,13 +90,15 @@ if [ -n "$QEMU_VAR" ] && [ "$QEMU_VAR" != 0 ]; then
 	VAR=(-drive "file=$VAR_IMG,format=raw,if=none,id=var" -device virtio-blk-device,drive=var)
 	CMDLINE="var_store=1 virtio_blk=1 virtio_blk_rw=1 ${QEMU_VAR_SAVE_AFTER:+var_save_after=$QEMU_VAR_SAVE_AFTER }$CMDLINE"
 fi
-# QEMU_GPU=1: the display is a virtio GPU with gfxstream behind it (QEMU's rutabaga device) instead of
-# ramfb: the kernel's virtio-gpu takes the scanout, and /dev/vgpu3d's OpenGL ES runs on this machine's GPU.
+# QEMU_GPU=1: beside ramfb a virtio GPU with gfxstream behind it (QEMU's rutabaga device), for /dev/vgpu3d:
+# OpenGL ES (and CoreAnimation with boot-arg gl=1) on this machine's GPU. The panel stays ramfb: as the
+# scanout, the rutabaga device's frames come back from gfxstream with parts missing once a guest GL
+# context is up (gfxstream 0.1.2). ramfb is created first, so it is console 0, the one the skin shows.
 # NVIDIA's EGL opens no display while WAYLAND_DISPLAY names the session's compositor (and Mesa's software
 # renderer answers instead), so QEMU runs without it: show it with qemu/emu.sh, not -display gtk.
 GPU=(-device ramfb)
 if [ -n "$QEMU_GPU" ] && [ "$QEMU_GPU" != 0 ]; then
-	GPU=(-device virtio-gpu-rutabaga-device,x-gfxstream-gles=on,hostmem=256M,xres=1125,yres=2436)
+	GPU+=(-device virtio-gpu-rutabaga-device,x-gfxstream-gles=on,hostmem=256M)
 	unset WAYLAND_DISPLAY DISPLAY
 fi
 # EMU_QMP=<socket>: shown by the emulator (qemu/emu.sh), which attaches as QEMU's D-Bus display over QMP
@@ -105,9 +107,12 @@ EMU=()
 # the profile's four cores (common/devices/qemu-virt.conf); QEMU_SMP=1 for one
 export QEMU_SMP=${QEMU_SMP:-4}
 [[ " $CMDLINE " == *" cpus="* ]] || CMDLINE="cpus=$QEMU_SMP $CMDLINE"
+# the kernel hands back to the loader after SECS and QEMU is stopped 40 s later; 0: neither
+LIMIT=; LIMIT_QEMU=0
+[ "$SECS" != 0 ] && LIMIT="loader_return_after=$SECS" LIMIT_QEMU=$((SECS + 40))
 xnuloader/mkpayload.py -o qemu/payload.bin kernel=$K ramdisk=$ROOT --rdres "$(printf '%x' "$(stat -c %s "$IMG")")" \
-	--cmdline "loader_return_after=$SECS epoch=$(date +%s) virtio_input=1 $CMDLINE" >/dev/null || exit 1
-QEMU_MEM=${RAM_GB}G exec qemu/run.sh $((SECS + 40)) \
+	--cmdline "$LIMIT epoch=$(date +%s) virtio_input=1 $CMDLINE" >/dev/null || exit 1
+QEMU_MEM=${RAM_GB}G exec qemu/run.sh $LIMIT_QEMU \
 	-object memory-backend-file,id=ram,size=$RAM_SIZE,mem-path="$PWD/qemu/ram.img",share=off \
 	-machine memory-backend=ram \
 	-global virtio-mmio.force-legacy=false -device virtio-tablet-device -device virtio-keyboard-device "${NET[@]}" "${SOUND[@]}" "${VAR[@]}" \
