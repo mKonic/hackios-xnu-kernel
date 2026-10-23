@@ -3637,3 +3637,23 @@ diff --git a/config/Private.exports b/config/Private.exports
  _port_name_to_task:_port_name_to_task_external
  _port_name_to_thread
  _post_sys_powersource
+diff --git a/config/Makefile b/config/Makefile
+--- a/config/Makefile
++++ b/config/Makefile
+@@ -124,14 +124,14 @@
+ 		$(foreach symbolset,$(filter-out Private,$(SYMBOL_COMPONENT_LIST)),	\
+ 			-export $(SOURCE)/$(symbolset).exports		\
+ 			-export $(SOURCE)/$(symbolset).$(EXPORT_SOURCE_ARCH_CONFIG_LC).exports)	\
+-		-output /dev/null $(_vstdout)
++		-output $(TARGET)/check-public.symbolset $(_vstdout)
+ 	$(_v)$(KEXT_CREATE_SYMBOL_SET)					\
+ 		$(ARCH_FLAGS_$(CURRENT_ARCH_CONFIG))			\
+ 		-import $(TARGET)/allsymbols				\
+ 		$(foreach symbolset,$(filter-out Unsupported,$(SYMBOL_COMPONENT_LIST)),	\
+ 			-export $(SOURCE)/$(symbolset).exports		\
+ 			-export $(SOURCE)/$(symbolset).$(EXPORT_SOURCE_ARCH_CONFIG_LC).exports)	\
+-		-output /dev/null $(_vstdout)
++		-output $(TARGET)/check-private.symbolset $(_vstdout)
+
+ $(OBJPATH)/$(MD_SUPPORTED_KPI_FILENAME): $(EXPORTS_FILES)
+ 	@$(LOG_SUPPORTED_KPI) "$(CURRENT_ARCH_CONFIG_LC)"
