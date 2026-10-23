@@ -21,6 +21,8 @@
 #      AUDIO=<where>       what plays the sound of iOS: a QEMU audio back end (pipewire, pa, alsa, sdl: each
 #                          needs its QEMU module, e.g. the package qemu-audio-pipewire) or FILE.wav to
 #                          write it into a file instead. Default: nowhere (the guest plays all the same).
+#      QEMU_PROFILE=<file> sample where the processors are, every millisecond, into FILE (QEMU's sampler plugin,
+#                          out/qemu/lib/libsampler.so; tools/qemu/build.sh builds it); qemu/profile.py reports
 #      QEMU_INSTANCE=<n>   to run several at once: each number has its own monitor and QMP ports
 #                          (4444 + 10n, 4445 + 10n); the file qemu/instance sets it for a working copy.
 #                          touch.py, screendump.sh and stop.sh follow the same rule.
@@ -136,7 +138,9 @@ LIMIT=; LIMIT_QEMU=0
 [ "$SECS" != 0 ] && LIMIT="loader_return_after=$SECS" LIMIT_QEMU=$((SECS + 40))
 xnuloader/mkpayload.py -o qemu/payload.bin kernel=$K ramdisk=$ROOT --rdres "$(printf '%x' "$(stat -c %s "$IMG")")" \
 	--cmdline "$LIMIT epoch=$(date +%s) virtio_input=1 $CMDLINE" >/dev/null || exit 1
-QEMU_MEM=${RAM_GB}G exec qemu/run.sh $LIMIT_QEMU \
+PROFILE=()
+[ -n "$QEMU_PROFILE" ] && PROFILE=(-plugin "$PWD/out/qemu/lib/libsampler.so,out=$(readlink -f "$QEMU_PROFILE")")
+QEMU_MEM=${RAM_GB}G exec qemu/run.sh $LIMIT_QEMU "${PROFILE[@]}" \
 	-object memory-backend-file,id=ram,size=$RAM_SIZE,mem-path="$PWD/qemu/ram.img",share=off \
 	-machine memory-backend=ram \
 	-global virtio-mmio.force-legacy=false -device virtio-tablet-device -device virtio-keyboard-device "${NET[@]}" "${SOUND[@]}" "${VAR[@]}" \

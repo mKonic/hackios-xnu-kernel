@@ -150,7 +150,8 @@ user_abort_trace(void)
  * and the return addresses up the stack. Shows what a daemon that "does nothing" waits for.
  * ustacks_now(NAME) does it at once: under QEMU, "qemu/touch.py stacks NAME" on the host.
  * The addresses are symbolized on the host (qemu/symstack.py).
- * The name "top" asks for something else: who has had the processor (see ustacks_top()).
+ * The name "top" asks for something else: who has had the processor (see ustacks_top()); "threads",
+ * the names of all threads (see ustacks_thread_names()).
  */
 #include <kern/recount.h>
 #include <kern/thread_call.h>
@@ -362,6 +363,73 @@ ustacks_top(void)
 	}
 }
 
+/*
+ * ustacks_now("threads"): a line for every thread there is, "threads: TID PID PROCESS NAME", after one
+ * with the kernel's slide and, for each process, one with its shared cache slide. The host's sampling
+ * profiler (qemu/profile.py) names its samples with them: on a DEVELOPMENT kernel, CONTEXTIDR_EL1 holds
+ * the running thread's ID (set_thread_registers in cswitch.s).
+ */
+#define USTACKS_NAMES_TASKS 512
+#define USTACKS_NAMES_THREADS 128
+
+static void
+ustacks_thread_names(void)
+{
+	static task_t found[USTACKS_NAMES_TASKS];
+	static struct {
+		uint64_t tid;
+		char name[64];
+	} snap[USTACKS_NAMES_THREADS];
+	unsigned count = 0;
+	task_t task;
+
+	printf("threads: kernel slide 0x%lx\n", (unsigned long)vm_kernel_slide);
+	lck_mtx_lock(&tasks_threads_lock);
+	queue_iterate(&tasks, task, task_t, tasks) {
+		if (count < USTACKS_NAMES_TASKS && get_bsdtask_info(task) != NULL) {
+			task_reference(task);
+			found[count++] = task;
+		}
+	}
+	lck_mtx_unlock(&tasks_threads_lock);
+	for (unsigned i = 0; i < count; i++) {
+		struct proc *proc = get_bsdtask_info(found[i]);
+		vm_shared_region_t region;
+		uint32_t slide = 0;
+		unsigned threads = 0;
+		thread_t thread;
+
+		task_lock(found[i]);
+		queue_iterate(&found[i]->threads, thread, thread_t, task_threads) {
+			if (threads == USTACKS_NAMES_THREADS) {
+				break;
+			}
+			snap[threads].tid = thread_tid(thread);
+			snap[threads].name[0] = 0;
+			if (get_bsdthread_info(thread) != NULL) {
+				bsd_getthreadname(get_bsdthread_info(thread), snap[threads].name);
+				snap[threads].name[63] = 0;
+			}
+			threads++;
+		}
+		task_unlock(found[i]);
+		region = vm_shared_region_get(found[i]);
+		if (region != NULL) {
+			slide = region->sr_slide;
+			vm_shared_region_deallocate(region);
+		}
+		if (proc != NULL) {
+			printf("threads: process %d %s, shared cache slide 0x%x\n", proc_pid(proc), proc_name_address(proc), slide);
+			for (unsigned t = 0; t < threads; t++) {
+				printf("threads: %llu %d %s %s\n", (unsigned long long)snap[t].tid, proc_pid(proc),
+				    proc_name_address(proc), snap[t].name);
+			}
+		}
+		task_deallocate(found[i]);
+	}
+	printf("threads: end\n");
+}
+
 static void
 ustacks_fire(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 {
@@ -371,6 +439,10 @@ ustacks_fire(__unused thread_call_param_t p0, __unused thread_call_param_t p1)
 
 	if (strcmp(ustacks_name, "top") == 0) {
 		ustacks_top();
+		goto again;
+	}
+	if (strcmp(ustacks_name, "threads") == 0) {
+		ustacks_thread_names();
 		goto again;
 	}
 	lck_mtx_lock(&tasks_threads_lock);

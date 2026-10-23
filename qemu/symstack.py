@@ -5,35 +5,29 @@ usage: symstack.py LOG [PROCESS]
 
 Reads the "ustacks:" (boot-args ustacks=NAME ustacks_at=SECONDS [ustacks_ms=PERIOD]), "usertrap:" and
 "userabort:" lines of a console log (and, before a "userabort:", the "First throw call stack" of the exception
-that led to it), subtracts the shared cache slide and looks every address up in the iOS dyld
-shared cache with "ipsw dyld a2s". Lookups take a few seconds each, so the answers are kept
-in ios165/a2s.json. Addresses outside the cache (the program itself) are shown as they are.
+that led to it), subtracts the shared cache slide and looks every address up in the table of the shared
+cache's functions (ios165/dsc-functions.txt, which qemu/dsc_symbols.py makes). Addresses outside the cache
+(the program itself) are shown as they are.
 """
-import json
 import os
 import re
-import subprocess
 import sys
 
-BASE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'ios165')
-CACHE = os.path.join(BASE, '20F66__iPhone10,3_6/dyld_shared_cache_arm64')
-KNOWN = os.path.join(BASE, 'a2s.json')
-CACHE_LOW, CACHE_HIGH = 0x180000000, 0x280000000        # unslid addresses of the shared cache
+import dsc_symbols
 
-known = json.load(open(KNOWN)) if os.path.exists(KNOWN) else {}
+CACHE_LOW, CACHE_HIGH = dsc_symbols.CACHE_LOW, dsc_symbols.CACHE_HIGH
+names = dsc_symbols.Names()
+collecting = True                       # the first pass only notes the addresses, to look them up together
 
 
 def name(address, slide):
     unslid = address - slide
     if not CACHE_LOW <= unslid < CACHE_HIGH:
         return f'{address:#x} (not in the shared cache)'
-    key = f'{unslid:#x}'
-    if key not in known:
-        out = subprocess.run(['ipsw', 'dyld', 'a2s', CACHE, key], capture_output=True, text=True).stdout
-        lines = [line for line in out.splitlines() if key in line]
-        known[key] = re.sub(r'^\S+:\s*', '', lines[-1]).strip() if lines else '?'
-        json.dump(known, open(KNOWN, 'w'), indent=0)
-    return known[key]
+    if collecting:
+        names.want(unslid)
+        return ''
+    return names.describe(unslid)
 
 
 def main():
@@ -83,4 +77,10 @@ def main():
 
 
 if __name__ == '__main__':
+    with open(os.devnull, 'w') as quiet:
+        stdout, sys.stdout = sys.stdout, quiet
+        main()
+        sys.stdout = stdout
+    names.resolve()
+    collecting = False
     main()
