@@ -8,10 +8,11 @@ if [ ! -x $E ] || [ -n "$(find tools/emu -newer $E -type f | head -1)" ]; then
 	tools/emu/build.sh >/dev/null || exit 1
 fi
 SECS=${1:-0}; shift
-# /private/var kept between boots (run-ios.sh QEMU_VAR): the first boot registers every application and
-# saves the settled volume; the boots after it start from that. QEMU_VAR=0 for a fresh volume every time.
-export QEMU_VAR=${QEMU_VAR:-1}
-[ "$QEMU_VAR" != 0 ] && [ ! -f "${QEMU_VAR_IMG:-qemu/var.img}" ] && export QEMU_VAR_SAVE_AFTER=${QEMU_VAR_SAVE_AFTER:-200}
+# /private/var is a disk of its own, HFS+, written as iOS writes like a phone's data volume (run-ios.sh
+# QEMU_VAR=hfs: qemu/var-hfs.img, made on first use; that first boot registers every application, later
+# ones find everything as it was left). QEMU_VAR=1: the older snapshot (var_store); QEMU_VAR=0: empty each time.
+export QEMU_VAR=${QEMU_VAR:-hfs}
+[ "$QEMU_VAR" = 1 ] && [ ! -f "${QEMU_VAR_IMG:-qemu/var.img}" ] && export QEMU_VAR_SAVE_AFTER=${QEMU_VAR_SAVE_AFTER:-200}
 # CoreAnimation draws with the host's GPU (run-ios.sh QEMU_GPU, boot-arg gl=1) where QEMU has gfxstream;
 # QEMU_GPU=0 for its software renderer
 if [ -z "$QEMU_GPU" ] && qemu-system-aarch64 -device help 2>/dev/null | grep -q '"virtio-gpu-rutabaga-device"'; then

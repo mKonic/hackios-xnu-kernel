@@ -83,7 +83,18 @@ fi
 # seconds in: boot once with it, and later boots skip the first-boot work (LaunchServices' registration
 # of every application). `rm qemu/var.img` starts from an empty volume again.
 VAR=()
-if [ -n "$QEMU_VAR" ] && [ "$QEMU_VAR" != 0 ]; then
+# QEMU_VAR=hfs: /private/var is an HFS+ volume of its own (qemu/var-hfs.img, or QEMU_VAR_IMG), written as iOS
+# writes, as a phone's data volume is: nothing to save and nothing to load. Made on first use.
+if [ "$QEMU_VAR" = hfs ]; then
+	VAR_IMG=${QEMU_VAR_IMG:-qemu/var-hfs.img}
+	if [ ! -f "$VAR_IMG" ]; then
+		MKFS=$(tools/mk-hfsprogs.sh) || { echo "run-ios.sh: no mkfs.hfsplus (tools/mk-hfsprogs.sh)" >&2; exit 1; }
+		truncate -s 16G "$VAR_IMG" && "$MKFS" -J -v Data "$VAR_IMG" >/dev/null || exit 1
+	fi
+	VAR_IMG=$(readlink -f "$VAR_IMG")
+	VAR=(-drive "file=$VAR_IMG,format=raw,if=none,id=var" -device virtio-blk-device,drive=var)
+	CMDLINE="var_hfs=rvblk0 virtio_blk=1 virtio_blk_rw=1 $CMDLINE"
+elif [ -n "$QEMU_VAR" ] && [ "$QEMU_VAR" != 0 ]; then
 	VAR_IMG=${QEMU_VAR_IMG:-qemu/var.img}
 	[ -f "$VAR_IMG" ] || truncate -s 12G "$VAR_IMG"     # the store sits 8 GiB in; two 2 GiB slots
 	VAR_IMG=$(readlink -f "$VAR_IMG")                   # (run.sh starts QEMU from qemu/)

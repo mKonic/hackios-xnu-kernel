@@ -1,0 +1,62 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -195,6 +195,43 @@
+ bsd/miscfs/apfs/apfs_deflate.c		optional apfs
+ bsd/miscfs/apfs/apfs_zbitmap.c		optional apfs
+ bsd/miscfs/apfs/apfs_lib.c		optional apfs
++bsd/hfs/core/hfs_builtin.c		standard
++bsd/hfs/core/MacOSStubs.c		standard
++bsd/hfs/core/BTree.c		standard
++bsd/hfs/core/BTreeAllocate.c		standard
++bsd/hfs/core/BTreeMiscOps.c		standard
++bsd/hfs/core/BTreeNodeOps.c		standard
++bsd/hfs/core/BTreeNodeReserve.c		standard
++bsd/hfs/core/BTreeScanner.c		standard
++bsd/hfs/core/BTreeTreeOps.c		standard
++bsd/hfs/core/BTreeWrapper.c		standard
++bsd/hfs/core/CatalogUtilities.c		standard
++bsd/hfs/core/FileExtentMapping.c		standard
++bsd/hfs/core/FileIDsServices.c		standard
++bsd/hfs/core/UnicodeWrappers.c		standard
++bsd/hfs/core/VolumeAllocation.c		standard
++bsd/hfs/core/hfs_attrlist.c		standard
++bsd/hfs/core/hfs_btreeio.c		standard
++bsd/hfs/core/hfs_catalog.c		standard
++bsd/hfs/core/hfs_chash.c		standard
++bsd/hfs/core/hfs_cnode.c		standard
++bsd/hfs/core/hfs_endian.c		standard
++bsd/hfs/core/hfs_extents.c		standard
++bsd/hfs/core/hfs_fsinfo.c		standard
++bsd/hfs/core/hfs_hotfiles.c		standard
++bsd/hfs/core/hfs_journal.c		standard
++bsd/hfs/core/hfs_link.c		standard
++bsd/hfs/core/hfs_lookup.c		standard
++bsd/hfs/core/hfs_notification.c		standard
++bsd/hfs/core/hfs_quota.c		standard
++bsd/hfs/core/hfs_readwrite.c		standard
++bsd/hfs/core/hfs_resize.c		standard
++bsd/hfs/core/hfs_search.c		standard
++bsd/hfs/core/hfs_vfsops.c		standard
++bsd/hfs/core/hfs_vfsutils.c		standard
++bsd/hfs/core/hfs_vnops.c		standard
++bsd/hfs/core/hfs_xattr.c		standard
++bsd/hfs/core/rangelist.c		standard
+ bsd/miscfs/apfs/apfs_write.c		optional apfs
+ bsd/miscfs/apfs/apfs_store.c		optional apfs
+ bsd/miscfs/apfs/apfs_vfsops.c		optional apfs
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -697,6 +697,11 @@
+ 	/* Initialize the file systems. */
+ 	bsd_init_kprintf("calling vfsinit\n");
+ 	vfsinit();
++	{
++		/* HFS+ built in (bsd/hfs/core/hfs_builtin.c): /private/var's filesystem under QEMU */
++		extern void hfs_builtin_start(void);
++		hfs_builtin_start();
++	}
+ 
+ #if CONFIG_PROC_UUID_POLICY
+ 	/* Initial proc_uuid_policy subsystem */
