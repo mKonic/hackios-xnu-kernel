@@ -13,3 +13,5 @@ export PATH=$XNUDEPS/host/bin:$PATH
 export XNU_SDK_PATH=$XNUDEPS/sdk/iPhoneOS16.5.xnu.sdk
 export XNU_SDK_VERSION=16.5
 export XNU_PLATFORM_PATH=$XNUDEPS/sdk/Platforms/iPhoneOS.platform
+# ldid signs the test apps with their entitlements: theos ships one when the host has none
+command -v ldid >/dev/null || [ ! -x "$THEOS/toolchain/linux/iphone/bin/ldid" ] || export LDID=${LDID:-$THEOS/toolchain/linux/iphone/bin/ldid}
