@@ -1,8 +1,13 @@
 diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
 --- a/bsd/dev/redwood_vgpu.c
 +++ b/bsd/dev/redwood_vgpu.c
-@@ -90,6 +90,8 @@
+@@ -88,8 +88,13 @@
+ 	uint64_t features;
+ 	uint8_t *cmd, *resp;                    /* device-visible bounce buffers */
  	uint64_t cmd_pa, resp_pa;
++	uint8_t *acmd, *aresp;                  /* ... of the one command that may be in flight unanswered (vgpu_post) */
++	uint64_t acmd_pa, aresp_pa;
++	bool posted;
  	/* the scanout */
  	bool shown;
 +	uint32_t scanout_res;                   /* the resource on scanout 0: ours, or a 3D one (redwood_vgpu_show) */
@@ -10,7 +15,164 @@ diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
  	void *fb;
  	uint64_t fb_pa;
  	uint32_t width, height, stride;
-@@ -281,6 +283,7 @@
+@@ -121,7 +126,9 @@
+ 	}
+ 	vg.cmd = vio_dma_alloc(REDWOOD_VGPU_CTRL_MAX, &vg.cmd_pa);
+ 	vg.resp = vio_dma_alloc(REDWOOD_VGPU_RESP_MAX, &vg.resp_pa);
+-	if (vg.cmd == NULL || vg.resp == NULL) {
++	vg.acmd = vio_dma_alloc(256, &vg.acmd_pa);
++	vg.aresp = vio_dma_alloc(256, &vg.aresp_pa);
++	if (vg.cmd == NULL || vg.resp == NULL || vg.acmd == NULL || vg.aresp == NULL) {
+ 		vio_fail(d);
+ 		return ENOMEM;
+ 	}
+@@ -136,6 +143,59 @@
+ 	return 0;
+ }
+ 
++/*
++ * Until the device has answered the command with this cookie (1: vgpu_submit's, 2: vgpu_post's).
++ * Most commands are answered in tens of microseconds, and 3D ones (a gfxstream pipe read waits for
++ * the host's render thread) in a few milliseconds. Interrupts may not come (polled), and a sleep is
++ * 10 ms at least: spin for the first 4 ms, then sleep a millisecond at a time. A read of the pipe
++ * may wait for long GPU work: give up after 20 s, not 2. Under vgpu_lock.
++ */
++static int
++vgpu_wait(void *cookie, uint32_t seq, uint32_t type)
++{
++	uint64_t now = mach_absolute_time(), spin_end, give_up;
++	uint32_t len;
++	void *done;
++
++	nanoseconds_to_absolutetime(4 * NSEC_PER_MSEC, &spin_end);
++	nanoseconds_to_absolutetime(20 * NSEC_PER_SEC, &give_up);
++	spin_end += now;
++	give_up += now;
++	for (;;) {
++		while ((done = vio_queue_get(vg.ctrlq, &len)) != NULL) {
++			if (done == (void *)2) {
++				vg.posted = false;
++				if (((struct ctrl_hdr *)vg.aresp)->type != RESP_OK_NODATA) {
++					printf("virtio-gpu: command 0x%x: answer 0x%x\n", ((struct ctrl_hdr *)vg.acmd)->type,
++					    ((struct ctrl_hdr *)vg.aresp)->type);
++				}
++			}
++			if (done == cookie) {
++				vio_intr_isr(vg.dev);
++				return 0;
++			}
++		}
++		now = mach_absolute_time();
++		if (now > give_up) {
++			printf("virtio-gpu: command 0x%x not answered\n", type);
++			return ETIMEDOUT;
++		}
++		if (now < spin_end) {
++			__asm__ volatile ("yield");
++			continue;
++		}
++		vio_intr_wait(vg.dev, seq, NSEC_PER_MSEC);
++		seq = vio_intr_seq(vg.dev);
++	}
++}
++
++/* The posted command answered, if there is one. Under vgpu_lock, device up. */
++static int
++vgpu_drain(void)
++{
++	return vg.posted ? vgpu_wait((void *)2, vio_intr_seq(vg.dev), ((struct ctrl_hdr *)vg.acmd)->type) : 0;
++}
++
+ /* One command, waited for. Under vgpu_lock, device up. */
+ static int
+ vgpu_submit(const void *cmd, uint32_t cmd_len, void *resp, uint32_t resp_len)
+@@ -144,13 +204,16 @@
+ 		{ vg.cmd_pa, cmd_len, false },
+ 		{ vg.resp_pa, resp_len, true },
+ 	};
+-	uint32_t seq, len;
+-	void *done;
++	uint32_t seq;
++	int error;
+ 
+ 	if (cmd_len < sizeof(struct ctrl_hdr) || cmd_len > REDWOOD_VGPU_CTRL_MAX ||
+ 	    resp_len < sizeof(struct ctrl_hdr) || resp_len > REDWOOD_VGPU_RESP_MAX) {
+ 		return EINVAL;
+ 	}
++	if ((error = vgpu_drain()) != 0) {
++		return error;
++	}
+ 	memcpy(vg.cmd, cmd, cmd_len);
+ 	bzero(vg.resp, resp_len);
+ 	seq = vio_intr_seq(vg.dev);
+@@ -158,35 +221,42 @@
+ 		return EIO;
+ 	}
+ 	vio_queue_kick(vg.ctrlq);
+-	/*
+-	 * Most commands are answered in tens of microseconds, and 3D ones (a gfxstream pipe read
+-	 * waits for the host's render thread) in a few milliseconds. Interrupts may not come
+-	 * (polled), and a sleep is 10 ms at least: spin for the first 4 ms, then sleep a millisecond
+-	 * at a time. A read of the pipe may wait for long GPU work: give up after 20 s, not 2.
+-	 */
+-	uint64_t now = mach_absolute_time(), spin_end, give_up;
+-	nanoseconds_to_absolutetime(4 * NSEC_PER_MSEC, &spin_end);
+-	nanoseconds_to_absolutetime(20 * NSEC_PER_SEC, &give_up);
+-	spin_end += now;
+-	give_up += now;
+-	while ((done = vio_queue_get(vg.ctrlq, &len)) == NULL) {
+-		now = mach_absolute_time();
+-		if (now > give_up) {
+-			printf("virtio-gpu: command 0x%x not answered\n", ((const struct ctrl_hdr *)cmd)->type);
+-			return ETIMEDOUT;
+-		}
+-		if (now < spin_end) {
+-			__asm__ volatile ("yield");
+-			continue;
+-		}
+-		vio_intr_wait(vg.dev, seq, NSEC_PER_MSEC);
+-		seq = vio_intr_seq(vg.dev);
++	if ((error = vgpu_wait((void *)1, seq, ((const struct ctrl_hdr *)cmd)->type)) != 0) {
++		return error;
+ 	}
+-	vio_intr_isr(vg.dev);
+ 	memcpy(resp, vg.resp, resp_len);
+ 	return 0;
+ }
+ 
++/*
++ * One command whose answer is just "OK", not waited for: the next command waits for it first (one
++ * in flight at most), and a refusal is only said. For a display flush, which QEMU answers once it
++ * has read the frame back and sent it to the display -- milliseconds the guest has better uses for.
++ */
++static int
++vgpu_post(void *cmd, uint32_t len, uint32_t type)
++{
++	struct vio_sg sg[2] = {
++		{ vg.acmd_pa, len, false },
++		{ vg.aresp_pa, sizeof(struct ctrl_hdr), true },
++	};
++	int error;
++
++	if (len > 256 || (error = vgpu_drain()) != 0) {
++		return len > 256 ? EINVAL : error;
++	}
++	bzero(cmd, sizeof(struct ctrl_hdr));
++	((struct ctrl_hdr *)cmd)->type = type;
++	memcpy(vg.acmd, cmd, len);
++	bzero(vg.aresp, sizeof(struct ctrl_hdr));
++	if (vio_queue_add(vg.ctrlq, sg, 2, (void *)2) != 0) {
++		return EIO;
++	}
++	vg.posted = true;
++	vio_queue_kick(vg.ctrlq);
++	return 0;
++}
++
+ /* A command whose answer is just "OK". */
+ static int
+ vgpu_simple(void *cmd, uint32_t len, uint32_t type)
+@@ -281,6 +351,7 @@
  		goto out;
  	}
  	vg.shown = true;
@@ -18,7 +180,7 @@ diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
  	printf("virtio-gpu: scanout 0 is %ux%u at 0x%llx\n", w, h, vg.fb_pa);
  	error = 0;
  out:
-@@ -303,6 +306,14 @@
+@@ -303,6 +374,14 @@
  	int error = ENODEV;
  
  	lck_mtx_lock(&vgpu_lock);
@@ -33,7 +195,7 @@ diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
  	if (vg.shown) {
  		transfer.r = (struct rect){ x, y, width, height };
  		transfer.offset = (uint64_t)y * vg.stride + (uint64_t)x * 4;
-@@ -320,6 +331,62 @@
+@@ -320,6 +399,62 @@
  	return error;
  }
  
@@ -59,11 +221,11 @@ diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
 +			known |= vg.been_shown[i] == resource;
 +		}
 +		if (vg.scanout_res == resource) {
-+			error = vgpu_simple(&flush, sizeof(flush), CMD_RESOURCE_FLUSH);
++			error = vgpu_post(&flush, sizeof(flush), CMD_RESOURCE_FLUSH);
 +		} else if (known) {
 +			error = vgpu_simple(&flush, sizeof(flush), CMD_RESOURCE_FLUSH);
 +			if (error == 0) {
-+				error = vgpu_simple(&scanout, sizeof(scanout), CMD_SET_SCANOUT);
++				error = vgpu_post(&scanout, sizeof(scanout), CMD_SET_SCANOUT);
 +			}
 +		} else {
 +			error = vgpu_simple(&scanout, sizeof(scanout), CMD_SET_SCANOUT);
@@ -96,7 +258,7 @@ diff --git a/bsd/dev/redwood_vgpu.c b/bsd/dev/redwood_vgpu.c
  #else /* no virtio core in this kernel */
  
  int
-@@ -335,6 +402,17 @@
+@@ -335,6 +470,17 @@
  }
  
  int
