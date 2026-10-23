@@ -78,6 +78,9 @@ if qemu-system-aarch64 -device help 2>/dev/null | grep -q '"virtio-sound-device"
 	SOUND+=(-device virtio-sound-device,audiodev=snd,streams=1)   # one stream: output, no microphone of the host
 	CMDLINE="virtio_sound=1 $CMDLINE"
 fi
+# EMU_QMP=<socket>: shown by the emulator (qemu/emu.sh), which attaches as QEMU's D-Bus display over QMP
+EMU=()
+[ -n "$EMU_QMP" ] && EMU=(-display dbus,p2p=yes -qmp "unix:$EMU_QMP,server=on,wait=off")
 xnuloader/mkpayload.py -o qemu/payload.bin kernel=$K ramdisk=$ROOT --rdres "$(printf '%x' "$(stat -c %s "$IMG")")" \
 	--cmdline "loader_return_after=$SECS epoch=$(date +%s) virtio_input=1 $CMDLINE" >/dev/null || exit 1
 QEMU_MEM=${RAM_GB}G exec qemu/run.sh $((SECS + 40)) \
@@ -85,4 +88,4 @@ QEMU_MEM=${RAM_GB}G exec qemu/run.sh $((SECS + 40)) \
 	-machine memory-backend=ram \
 	-global virtio-mmio.force-legacy=false -device virtio-tablet-device -device virtio-keyboard-device "${NET[@]}" "${SOUND[@]}" \
 	-device ramfb -monitor tcp:127.0.0.1:$((4444 + 10 * INSTANCE)),server,nowait \
-	-qmp tcp:127.0.0.1:$((4445 + 10 * INSTANCE)),server,nowait "$@"
+	-qmp tcp:127.0.0.1:$((4445 + 10 * INSTANCE)),server,nowait "${EMU[@]}" "$@"
