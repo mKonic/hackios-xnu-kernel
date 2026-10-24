@@ -1,0 +1,13 @@
+diff --git a/bsd/vfs/vfs_vnops.c b/bsd/vfs/vfs_vnops.c
+index 5b51e9c46a8d..6872b94631c9 100644
+--- a/bsd/vfs/vfs_vnops.c
++++ b/bsd/vfs/vfs_vnops.c
+@@ -964,7 +964,7 @@ vn_rdwr_64(
+ 	int spacetype;
+ 	struct vfs_context context;
+ 	int error = 0;
+-	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
++	uio_stackbuf_t uio_buf[(UIO_SIZEOF(1) + sizeof(uio_stackbuf_t) - 1) / sizeof(uio_stackbuf_t)];
+ 
+ 	context.vc_thread = current_thread();
+ 	context.vc_ucred = cred;

@@ -3202,6 +3202,10 @@ redwood_adsp_init(void)
 	if (last_step == 0 && (!PE_parse_boot_argn("adsp", &on, sizeof(on)) || on != 1)) {
 		return;
 	}
+	if (redwood_platform_blocks_legacy_drivers()) {
+		printf("adsp: adsp=1 and adsp_step=N require the redwood platform; legacy DSP initialization skipped\n");
+		return;
+	}
 	if (pe_arm_get_soc_base_phys() != REDWOOD_SOC_BASE) {
 		printf("adsp: adsp=1 and adsp_step=N are for the phone's audio DSP, and this is not the phone\n");
 		return;

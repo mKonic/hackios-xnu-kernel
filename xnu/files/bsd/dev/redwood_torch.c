@@ -732,6 +732,10 @@ redwood_torch_init(void)
 		return;
 	}
 	level = level > 3 ? 3 : level;
+	if (redwood_platform_blocks_legacy_drivers()) {
+		printf("torch: torch=1..3 require the redwood platform; legacy torch initialization skipped\n");
+		return;
+	}
 	if (kernel_thread_start(torch_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	}

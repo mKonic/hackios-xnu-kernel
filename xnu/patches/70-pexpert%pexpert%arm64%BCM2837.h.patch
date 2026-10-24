@@ -1,0 +1,42 @@
+diff --git a/pexpert/pexpert/arm64/BCM2837.h b/pexpert/pexpert/arm64/BCM2837.h
+index d9f0723244e5..53fe4f371d7f 100644
+--- a/pexpert/pexpert/arm64/BCM2837.h
++++ b/pexpert/pexpert/arm64/BCM2837.h
+@@ -11,6 +11,15 @@
+ #define BCM2837
+ #define BCM2837_BRINGUP
+ #define ARM_ARCH_TIMER
++#define GENERIC_GIC_V3_IRQ                 1 /* interrupts via GICv3 Group 1, see osfmk/arm64/gic_v3_irq.c */
++#define GENERIC_PSCI_SMP                  1 /* more cores are started through PSCI, see osfmk/arm64/psci_smp.c */
++
++/*
++ * The cores this kernel really runs on (Cortex-A55/A78, QEMU cortex-a76) are
++ * ARMv8.2: they set PSTATE.PAN on every exception entry, so the kernel must
++ * know to lift it around user memory accesses.
++ */
++#define __ARM_PAN_AVAILABLE__     1
+ 
+ #define __ARM_ARCH__              8
+ #define __ARM_VMSA__              8
+@@ -22,6 +31,7 @@
+ #ifndef ASSEMBLER
+ 
+ #define PI3_UART
++#define VMAPPLE_UART                    /* PL011, as found on QEMU virt */
+ 
+ #define PI3_BREAK                               asm volatile("brk #0");
+ 
+@@ -60,8 +70,11 @@
+ #define BCM2837_PUT32(addr, value) do { *((volatile uint32_t *) addr) = value; } while(0)
+ #define BCM2837_GET32(addr) *((volatile uint32_t *) addr)
+ 
+-#define PLATFORM_PANIC_LOG_PADDR        0x3c0fc000
+-#define PLATFORM_PANIC_LOG_SIZE         16384        // 16kb
++/*
++ * No fixed PLATFORM_PANIC_LOG_PADDR: the Raspberry Pi address (0x3c0fc000) is
++ * not RAM on other boards. The panic log region comes from the device tree
++ * instead (/pram and /chosen/embedded-panic-log-size), like on Apple devices.
++ */
+ #endif /* ! ASSEMBLER */
+ 
+ #endif /* ! _PEXPERT_ARM_BCM2837_H */

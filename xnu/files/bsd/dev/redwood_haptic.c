@@ -985,6 +985,10 @@ redwood_haptic_init(void)
 	if (level > 5) {
 		level = 5;
 	}
+	if (redwood_platform_blocks_legacy_drivers()) {
+		printf("haptic: haptic=1..5 require the redwood platform; legacy haptic initialization skipped\n");
+		return;
+	}
 	if (kernel_thread_start(haptic_thread, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	}

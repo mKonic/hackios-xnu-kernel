@@ -1,0 +1,18 @@
+diff --git a/osfmk/kern/sched.h b/osfmk/kern/sched.h
+index a5f68ade084b..9741eb1b3ecd 100644
+--- a/osfmk/kern/sched.h
++++ b/osfmk/kern/sched.h
+@@ -464,4 +464,13 @@ extern int sched_rt_n_backup_processors;
+ 
+ extern bool system_is_SMT;
+ 
++/*
++ * The "secondaries" are not the second threads of hyperthreaded cores but slower cores of their
++ * own, each paired with a faster one (ml_pair_slow_processors() in osfmk/arm64/machine_routines.c):
++ * the scheduler still prefers the primaries, but what runs on one core does not slow the other,
++ * so a secondary is not kept idle for its primary's sake, and when a primary goes idle a thread
++ * running on a secondary is moved to it.
++ */
++extern bool sched_slow_secondaries;
++
+ #endif  /* _KERN_SCHED_H_ */

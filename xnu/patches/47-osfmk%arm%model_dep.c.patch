@@ -1,0 +1,28 @@
+diff --git a/osfmk/arm/model_dep.c b/osfmk/arm/model_dep.c
+index 39daaf8db949..64ceb1a5f201 100644
+--- a/osfmk/arm/model_dep.c
++++ b/osfmk/arm/model_dep.c
+@@ -79,6 +79,9 @@
+ #include <arm/cpu_data_internal.h>
+ #include <arm/cpu_internal.h>
+ #include <arm/misc_protos.h>
++#if defined(__arm64__)
++#include <arm64/psci_smp.h>
++#endif
+ #include <libkern/OSKextLibPrivate.h>
+ #include <vm/vm_kern.h>
+ #include <kern/kern_cdata.h>
+@@ -1156,6 +1159,13 @@ wait_while_mp_kdp_trap(bool check_SIGPdebug)
+ 			found_SIGPdebug = true;
+ 			break;
+ 		}
++#if defined(GENERIC_PSCI_SMP)
++		/*
++		 * The panic this processor is waiting out ends in a return to the boot loader:
++		 * its interrupts are off here, so this is where it is told (psci_smp.c).
++		 */
++		psci_smp_stop_here();
++#endif
+ 		__builtin_arm_wfe();
+ 	}
+ 	os_atomic_clear_exclusive();

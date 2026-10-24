@@ -5,6 +5,7 @@
 #include <kern/locks.h>
 #include <kern/thread_call.h>
 #include <libkern/libkern.h>
+#include <mach/mach_types.h>
 #include <miscfs/devfs/devfs.h>
 #include <sys/conf.h>
 #include <sys/errno.h>
@@ -13,6 +14,7 @@
 #include <sys/systm.h>
 #include <sys/uio.h>
 #include <pexpert/pexpert.h>
+#include <pexpert/device_tree.h>
 
 #define TOUCH_QUEUE     512             /* records; a power of two */
 
@@ -54,6 +56,29 @@ latency_lines(void)
 		touch_lat = PE_parse_boot_argn("touch_lat", &on, sizeof(on)) && on != 0;
 	}
 	return touch_lat != 0;
+}
+
+/* Preserve the existing redwood and QEMU paths using their loader GIC descriptions.
+ * Other or incomplete descriptions block legacy drivers without probing hardware. */
+bool
+redwood_platform_blocks_legacy_drivers(void)
+{
+	DTEntry entry;
+	const void *property;
+	unsigned int size;
+
+	if (SecureDTLookupEntry(NULL, "/arm-io/gic", &entry) != kSuccess ||
+	    SecureDTGetProperty(entry, "reg", &property, &size) != kSuccess || size != 4 * sizeof(uint64_t)) {
+		return true;
+	}
+	const uint64_t *reg = property;
+	vm_offset_t base = pe_arm_get_soc_base_phys();
+	if (reg[1] != 0x10000 || reg[3] != 0x100000) {
+		return true;
+	}
+	bool redwood = base == 0x00400000 && reg[0] == 0x17600000 && reg[2] == 0x17660000;
+	bool qemu = base == 0x08000000 && reg[0] == 0 && reg[2] == 0xa0000;
+	return !redwood && !qemu;
 }
 
 static LCK_GRP_DECLARE(touch_lck_grp, "redwood-touch");

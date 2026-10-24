@@ -1,0 +1,4 @@
+Placeholder DTB for the Android boot-image "dtb" slot when the payload is a
+Mu-Silicium UEFI FD: LK hands this blob to the "kernel" (our BootShim, which
+ignores it); the real device tree travels inside the FD as a FREEFORM file.
+Keeps xnu-annibale-log.img under the LK fastboot-boot size limit.

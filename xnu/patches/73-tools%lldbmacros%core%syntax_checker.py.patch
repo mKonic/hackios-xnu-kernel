@@ -1,0 +1,20 @@
+diff --git a/tools/lldbmacros/core/syntax_checker.py b/tools/lldbmacros/core/syntax_checker.py
+index 3ebc295117a3..de101eafc83b 100755
+--- a/tools/lldbmacros/core/syntax_checker.py
++++ b/tools/lldbmacros/core/syntax_checker.py
+@@ -12,10 +12,13 @@ Usage:
+ """
+ import sys
+ import os
++# When this file is executed directly, its directory is first on sys.path.
++# That directory contains collections.py, which shadows Python's standard
++# library collections module while importing re on Python 3.14 and newer.
++_script_dir = os.path.dirname(os.path.abspath(__file__))
++sys.path = [p for p in sys.path if os.path.abspath(p or os.curdir) != _script_dir]
+ import re
+-
+ tabs_search_rex = re.compile("^\s*\t+",re.MULTILINE|re.DOTALL)
+-
+ def find_non_ascii(s):
+     for c in s:
+         if ord(c) >= 0x80: return True

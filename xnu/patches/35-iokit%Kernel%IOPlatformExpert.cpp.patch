@@ -1,0 +1,29 @@
+diff --git a/iokit/Kernel/IOPlatformExpert.cpp b/iokit/Kernel/IOPlatformExpert.cpp
+index 7a32a23e4bb1..35dc7b503846 100644
+--- a/iokit/Kernel/IOPlatformExpert.cpp
++++ b/iokit/Kernel/IOPlatformExpert.cpp
+@@ -51,6 +51,9 @@
+ #include <libkern/c++/OSContainers.h>
+ #include <libkern/c++/OSSharedPtr.h>
+ #include <libkern/crypto/sha1.h>
++#include <libkern/crypto/register_crypto.h>
++
++extern "C" crypto_functions_t g_crypto_funcs;     /* NULL until a crypto provider has registered */
+ #include <libkern/OSAtomic.h>
+ 
+ #if defined(__arm64__)
+@@ -2176,6 +2179,14 @@ IOPlatformExpertDevice::generatePlatformUUID( void )
+ 	uuid_string_t     uuid;
+ 
+ #if !defined(__x86_64__)
++	/*
++	 * The first call (configureDefaults, from InitIOKit) comes before the crypto provider
++	 * has registered when that provider is not Apple's corecrypto; the identifier is then
++	 * made by the second call, when the platform expert starts.
++	 */
++	if (g_crypto_funcs == NULL) {
++		return;
++	}
+ 	entry = IORegistryEntry::fromPath( "/chosen", gIODTPlane );
+ 	if (entry) {
+ 		OSData * data1;

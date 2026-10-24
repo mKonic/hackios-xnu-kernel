@@ -549,6 +549,10 @@ redwood_buttons_init(void)
 	if (!enabled) {
 		return;
 	}
+	if (redwood_platform_blocks_legacy_drivers()) {
+		printf("buttons: legacy TLMM initialization skipped; annibale_buttons handles buttons= on annibale\n");
+		return;
+	}
 	PE_parse_boot_argn("buttons_steps", &steps, sizeof(steps));
 	if (steps == 0) {
 		return;

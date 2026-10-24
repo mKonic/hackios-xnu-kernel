@@ -27,6 +27,8 @@
 #include <vm/vm_page.h>
 #include <vm/vm_compressor.h>
 
+extern int vsnprintf(char *, size_t, const char *, va_list);   /* (osfmk/kern/printf.c; no header has it) */
+
 /*
  * The console log handed back to the loader. A long session writes more than fits, and both
  * ends matter: the start of the boot is kept as it is, and of everything after it the most
@@ -47,13 +49,16 @@ void loader_return(void);
 extern void redwood_adreno_quiesce(void);
 extern void redwood_adreno_stop(void);
 extern void redwood_adreno_minute(void);
+extern void adreno8_quiesce(void);      /* bsd/dev/adreno8.c: the Adreno 830's stepper on the other phone */
 extern void redwood_wifi_stop(void);
 extern void redwood_wifi_quiesce(void);
 extern void redwood_adsp_stop(void);
 extern void redwood_adsp_quiesce(void);
 extern void redwood_ddr_quiesce(void);
 extern void redwood_haptic_quiesce(void);
+extern void annibale_haptic_quiesce(void);
 extern void redwood_torch_quiesce(void);
+extern void annibale_torch_quiesce(void);
 extern void redwood_camera_quiesce(void);
 extern void redwood_mic_quiesce(void);
 extern void redwood_ufs_quiesce(void);
@@ -131,6 +136,37 @@ loader_log_line(const char *line)
 		os_atomic_store(&loader_log_lock, 0, release);
 	}
 	__builtin_arm_wsr64("DAIF", daif);
+}
+
+/* Record the initial trap without acquiring the video console lock. */
+void loader_fault_log(const char *message, uint64_t pc, uint64_t lr, uint32_t esr, uint64_t far);
+
+void
+loader_fault_log(const char *message, uint64_t pc, uint64_t lr, uint32_t esr, uint64_t far)
+{
+	char text[256];
+
+	snprintf(text, sizeof(text), "\nFAULT: %s pc=0x%llx lr=0x%llx esr=0x%x far=0x%llx\n",
+	    message, pc, lr, esr, far);
+	loader_log_line(text);
+}
+
+/* Save the original panic before platform debugger setup can itself fault. */
+void loader_panic_log(const char *format, va_list *args, unsigned long caller);
+
+void
+loader_panic_log(const char *format, va_list *args, unsigned long caller)
+{
+	char text[768];
+	va_list copy;
+
+	snprintf(text, sizeof(text), "\nPANIC caller 0x%lx: ", caller);
+	loader_log_line(text);
+	va_copy(copy, *args);
+	vsnprintf(text, sizeof(text), format, copy);
+	va_end(copy);
+	loader_log_line(text);
+	loader_log_putc('\n');
 }
 
 static void
@@ -253,7 +289,8 @@ loader_jump(uint64_t reason, uint64_t code)
 	 * firmware switch this one off. It must go as the other cores do (psci_smp_cpu_off()), with
 	 * nothing pending: after a panic the "stop" signal and the timer are.
 	 */
-	if (PE_parse_boot_argn("bootcpu", &own_core, sizeof(own_core))) {
+	/* Early checkpoints can return before PE_init_platform installs bootArgs. */
+	if (PE_state.bootArgs != NULL && PE_parse_boot_argn("bootcpu", &own_core, sizeof(own_core))) {
 		__builtin_arm_wsr64("CNTV_CTL_EL0", CNTV_CTL_EL0_IMASKED);
 		gic_v3_irq_cpu_shutdown();
 	}
@@ -371,11 +408,14 @@ loader_return(void)
 #endif
 	redwood_ufs_quiesce();          /* this kernel's requests to the storage done, UEFI's list as it was, for the log */
 	redwood_adreno_quiesce();       /* the GPU block, if it was started, has tables in memory that is about to be reused */
+	adreno8_quiesce();              /* the other phone's GMU, if its stepper ran, back in reset, and its translation off */
 	redwood_wifi_quiesce();         /* the Wi-Fi DSP, if it still runs (a panic), is not left to itself */
 	redwood_adsp_quiesce();         /* nor the audio DSP */
 	redwood_ddr_quiesce();          /* and the vote for the memory's bandwidth taken away */
 	redwood_haptic_quiesce();       /* the vibration motor's chip back into reset, if it was let out */
+	annibale_haptic_quiesce();      /* or the PMIC's haptics block of the other phone, if it was configured */
 	redwood_torch_quiesce();        /* the flashlight off, if it was lit */
+	annibale_torch_quiesce();       /* or the other phone's, lit on its PMIC's flash module */
 	redwood_camera_quiesce();       /* the camera powered down, if it was powered up */
 	redwood_mic_quiesce();          /* (what the microphones' path did, said again: it happens in the log's middle) */
 	/*

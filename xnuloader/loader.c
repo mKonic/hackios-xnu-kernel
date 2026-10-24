@@ -255,11 +255,10 @@ clean_dcache(uint64_t start, uint64_t end)
 /* Log persistence: raw write to a GPT partition (phone only)               */
 
 static efi_block_io *
-find_log_partition(void)
+find_partition_named(const char16 *want, unsigned want_len)
 {
 	static const efi_guid part_guid = EFI_PARTITION_INFO_GUID;
 	static const efi_guid blk_guid = EFI_BLOCK_IO_GUID;
-	static const char16 want[] = LOG_PARTITION;
 	efi_handle *handles;
 	uint64_t count;
 
@@ -274,7 +273,7 @@ find_log_partition(void)
 		if (EFI_ERROR(BS->handle_protocol(handles[i], &part_guid, (void **)&info)) || info->type != 2) {
 			continue;
 		}
-		for (unsigned k = 0; k < sizeof(want) / sizeof(want[0]); k++) {
+		for (unsigned k = 0; k < want_len; k++) {
 			if (info->name[k] != want[k]) {
 				match = 0;
 				break;
@@ -286,6 +285,31 @@ find_log_partition(void)
 	}
 	return NULL;
 }
+
+/* F09LW-BEGIN -- host-extracted verbatim by /tmp/task19/logwrite_harness.c */
+/*
+ * Review F09, lead's ruling b: the phone has no logdump partition, and boot_a -- where this
+ * used to fall back -- carries the boot image of the slot-boot flow. So the fallback is no
+ * longer automatic: only the explicit "oem logwrite" command, this flag set while it runs,
+ * lets the log land on boot_a. Every automatic flush with no logdump partition goes nowhere
+ * (its kernel log is echoed on the console instead) and the USB side stays pure reads.
+ */
+static int log_fallback_boot_a_allowed;
+
+static efi_block_io *
+find_log_partition(void)
+{
+	static const char16 want[] = LOG_PARTITION;
+	efi_block_io *bio;
+
+	bio = find_partition_named(want, sizeof(want) / sizeof(want[0]));
+	if (bio == NULL && log_fallback_boot_a_allowed) {
+		static const char16 alt[] = u"boot_a";
+		bio = find_partition_named(alt, sizeof(alt) / sizeof(alt[0]));
+	}
+	return bio;
+}
+/* F09LW-END */
 
 /*
  * The "staged" buffer holds the loader log followed by the kernel log of the
@@ -326,6 +350,7 @@ static int hc_list_is_uefis(void);
 static int hc_log_skips;                /* logs not written this run (said twice at most) */
 static void hc_print_state(const char *when);
 static void hc_take_back(const char *when);
+static int skip_ufs_arbitration;        /* annibale: the kernel never shares the UFS controller, set at platform selection */
 
 static void
 write_logs(const char *klog, uint64_t klog_len)
@@ -334,7 +359,11 @@ write_logs(const char *klog, uint64_t klog_len)
 
 	compose_logs(klog, klog_len);
 	if (bio == NULL) {
-		/* No log partition (QEMU): echo the returned kernel log on the console instead. */
+		/*
+		 * No log partition, and boot_a writes are the oem logwrite command's business alone
+		 * (review F09 ruling b): QEMU and the automatic phone flushes land here, echoing the
+		 * returned kernel log on the console instead. "upload" still stages the same text.
+		 */
 		if (klog != NULL) {
 			print("\n== KERNEL LOG ==\n");
 			for (uint64_t i = 0; i < klog_len; i++) {
@@ -349,8 +378,13 @@ write_logs(const char *klog, uint64_t klog_len)
 	efi_status ws, rs = 0;
 	int same = 0;
 
-	/* only through UEFI's own transfer list (see hc_take_back) */
-	if (!hc_list_is_uefis()) {
+	/*
+	 * Only through UEFI's own transfer list (see hc_take_back) -- that is the dance redwood needs
+	 * because its kernel takes the UFS controller over. annibale's kernel boots from a ramdisk and
+	 * never touches the UFS controller, and while the loader waits on USB no kernel runs at all, so
+	 * UEFI's BlockIo owns the storage outright: write straight through it on annibale (k90-port).
+	 */
+	if (!hc_list_is_uefis() && !skip_ufs_arbitration) {
 		if (hc_log_skips++ < 2) {
 			hc_print_state("log not written");
 			print("log: NOT WRITTEN to logdump: UEFI's transfer list is not the one in the controller\n");
@@ -377,10 +411,171 @@ write_logs(const char *klog, uint64_t klog_len)
 	compose_logs(klog, klog_len);
 }
 
+
+/* F09-PROBE-BEGIN -- host-extracted verbatim by /tmp/task19/probe_harness.c */
+/*
+ * Storage diagnostics. Review F09: entering the USB diagnostics used to write a 4 KiB probe
+ * pattern over LBA 0 of five partitions -- misc and metadata are Android's live partitions and
+ * boot_a carries the boot image on the slot-boot path -- and nothing was saved or restored.
+ * The automatic path now only reads: inspect_one() and inspect_storage() report what BlockIo
+ * exposes without a single write. A write check survives behind the explicit "oem probe"
+ * command, and even there it saves the block first and writes it back, verifying every step.
+ * (Host simulation: logs saved under /tmp/task19/.)
+ */
+static const char *
+inspect_one(const char16 *name, unsigned len, const char *tag)
+{
+	efi_block_io *bio = find_partition_named(name, len);
+
+	print("probe %s: handle %x\n", tag, (uint64_t)(uintptr_t)bio);
+	if (bio == NULL) {
+		return NULL;
+	}
+	print("probe %s: bs=%d blocks=%x mediaid=%x\n", tag, bio->media->block_size,
+	    (uint64_t)bio->media->last_block, (uint64_t)bio->media->media_id);
+	static char blk[4096];
+
+	memset(blk, 0, sizeof(blk));
+	efi_status r = bio->read_blocks(bio, bio->media->media_id, 0, sizeof(blk), blk);
+	print("probe %s: read=%x head0=%x (read only, no write)\n", tag, r, *(uint32_t *)blk);
+	return tag;
+}
+
+/*
+ * The writable check, for one partition, non-destructively: the original first block goes into
+ * memory first, the pattern is verified by read-back, and the original goes back and is itself
+ * read back. Only the explicit "oem probe" command reaches this.
+ */
+static void
+probe_one(const char16 *name, unsigned len, const char *tag)
+{
+	static char blk[4096], orig[4096];
+
+	efi_block_io *bio = find_partition_named(name, len);
+
+	print("probe %s: handle %x\n", tag, (uint64_t)(uintptr_t)bio);
+	if (bio == NULL) {
+		return;
+	}
+	print("probe %s: bs=%d blocks=%x mediaid=%x\n", tag, bio->media->block_size,
+	    (uint64_t)bio->media->last_block, (uint64_t)bio->media->media_id);
+	memset(orig, 0, sizeof(orig));
+	memset(blk, 0, sizeof(blk));
+	efi_status r0 = bio->read_blocks(bio, bio->media->media_id, 0, sizeof(orig), orig);
+	if (EFI_ERROR(r0)) {
+		print("probe %s: save read=%x, not touching the partition\n", tag, r0);
+		return;
+	}
+	memset(blk, '.', sizeof(blk));
+	memcpy(blk, "XNUPROBE-", 9);
+	memcpy(blk + 9, tag, str_len(tag));
+	memcpy(blk + 9 + str_len(tag), "-001\n", 5);
+	efi_status w = bio->write_blocks(bio, bio->media->media_id, 0, sizeof(blk), blk);
+	efi_status f = bio->flush_blocks(bio);
+	memset(blk, 0, sizeof(blk));
+	efi_status r = bio->read_blocks(bio, bio->media->media_id, 0, sizeof(blk), blk);
+	int same = !EFI_ERROR(r) && memcmp(blk, "XNUPROBE-", 9) == 0;
+	memcpy(blk, orig, sizeof(blk));
+	efi_status w2 = bio->write_blocks(bio, bio->media->media_id, 0, sizeof(blk), blk);
+	efi_status f2 = bio->flush_blocks(bio);
+	memset(blk, 0, sizeof(blk));
+	efi_status r2 = bio->read_blocks(bio, bio->media->media_id, 0, sizeof(blk), blk);
+	int back = !EFI_ERROR(r2) && memcmp(blk, orig, sizeof(orig)) == 0;
+	print("probe %s: save=%x write=%x flush=%x read=%x pattern=%s restore=%x/%x restored=%s\n", tag,
+	    r0, w, f, r, same ? "seen" : "NOT seen", w2, f2, back ? "yes" : "NO -- CHECK THE PARTITION");
+}
+
+static const char16 n_boot_a[] = u"boot_a";
+static const char16 n_misc[] = u"misc";
+static const char16 n_metadata[] = u"metadata";
+static const char16 n_logfs[] = u"logfs";
+static const char16 n_sclogs[] = u"xbl_sc_logs";
+
+static const struct {
+	const char16 *name;
+	unsigned len;
+	const char *tag;
+} probe_targets[] = {
+	{ n_boot_a, sizeof(n_boot_a) / sizeof(char16), "boot_a" },
+	{ n_misc, sizeof(n_misc) / sizeof(char16), "misc" },
+	{ n_metadata, sizeof(n_metadata) / sizeof(char16), "metadata" },
+	{ n_logfs, sizeof(n_logfs) / sizeof(char16), "logfs" },
+	{ n_sclogs, sizeof(n_sclogs) / sizeof(char16), "sclogs" },
+};
+
+/* what the USB entry runs automatically: read-only, zero writes */
+static void
+inspect_storage(void)
+{
+	for (unsigned i = 0; i < sizeof(probe_targets) / sizeof(probe_targets[0]); i++) {
+		inspect_one(probe_targets[i].name, probe_targets[i].len, probe_targets[i].tag);
+	}
+}
+
+/* the explicit-write version, reached only through "oem probe" (kept under its old name) */
+static void
+probe_boot_a(void)
+{
+	for (unsigned i = 0; i < sizeof(probe_targets) / sizeof(probe_targets[0]); i++) {
+		probe_one(probe_targets[i].name, probe_targets[i].len, probe_targets[i].tag);
+	}
+}
+/* F09-PROBE-END */
+
 static void
 flush_log(void)
 {
 	write_logs(NULL, 0);
+}
+
+/*
+ * Load a staged disk image off a real GPT partition into the resident root address, which is
+ * where QEMU's host leaves it in guest RAM (docs/analysis/rootfs-strategy.md route D): the
+ * 2.4 GB iOS system volume therefore needs neither the boot image nor a kernel storage driver.
+ * EDK2 BlockIO reads work on this phone (writes do not, which this path never needs).
+ */
+static int
+rdfile_load(const char *part, uint64_t off, uint64_t size, uint64_t dst)
+{
+	static uint8_t bounce[262144];   /* some UFS BlockIO drivers cap single transfers; 256 KiB is safe */
+	char16 wname[40];
+	unsigned n;
+
+	for (n = 0; part[n] != 0 && n < sizeof(wname) / sizeof(wname[0]) - 1; n++) {
+		wname[n] = part[n];
+	}
+	wname[n] = 0;
+	efi_block_io *bio = find_partition_named(wname, n + 1);
+
+	if (bio == NULL) {
+		print("rdfile: partition %s not found\n", part);
+		return 0;
+	}
+	uint64_t bs = bio->media->block_size;
+	uint64_t total = (bio->media->last_block + 1) * bs;
+	uint64_t start = off == ~0ull ? total - size : off;
+
+	print("rdfile: %s bs=%d total=%x start=%x size=%x\n", part, (uint64_t)bs, total, start, size);
+	if (size == 0 || (start % bs) != 0 || start + size > total) {
+		print("rdfile: bad range\n");
+		return 0;
+	}
+	memset((void *)dst, 0, size); /* image holes must read as zeroes, as QEMU's sparse file gives */
+	for (uint64_t done = 0; done < size; ) {
+		uint64_t chunk = size - done < sizeof(bounce) ? size - done : sizeof(bounce);
+
+		efi_status s = bio->read_blocks(bio, bio->media->media_id, (start + done) / bs, chunk, bounce);
+		if (EFI_ERROR(s)) {
+			print("rdfile: read status %x at %x\n", s, done);
+			return 0;
+		}
+		memcpy((void *)(dst + done), bounce, (size_t)chunk);
+		done += chunk;
+		if ((done >> 20) % 256 == 0) {
+			print("rdfile: %x / %x\n", done, size);
+		}
+	}
+	return 1;
 }
 
 /* ------------------------------------------------------------------------ */
@@ -513,54 +708,7 @@ dt_end(struct dt_writer *w)
 /* ------------------------------------------------------------------------ */
 /* Platform description                                                     */
 
-struct platform {
-	const char *name;
-	uint64_t io_base, io_size;       /* one window covering the SoC peripherals */
-	uint64_t gic_dist, gic_redist;   /* GICv3 */
-	uint64_t uart;                   /* PL011, 0 if none */
-	int psci_hvc;                    /* the firmware's power interface is called with HVC, not SMC */
-	int log_other_cpu;               /* keep notes in the log partition while a kernel starts on another core */
-	int cores;                       /* at most this many processor cores, numbered from 0 ... */
-	int core_shift;                  /* ... in this bit of MPIDR: the phone numbers them in the second affinity field */
-	uint32_t timeout_scale;          /* a kernel on several cores gets this much longer to wait for a lock, 0: as it is */
-	uint32_t small_cores;            /* a bit for each of the slower cores, by number: "small-core" in the device tree */
-	uint64_t fb_base;                /* the framebuffer the firmware reports (GOP): it tells this device apart */
-};
-
-static const struct platform platform_qemu_virt = {
-	.name = "qemu-virt", .io_base = 0x08000000, .io_size = 0x08000000,
-	.gic_dist = 0x08000000, .gic_redist = 0x080A0000, .uart = 0x09000000, .psci_hvc = 1,
-	.cores = 8, .core_shift = 0,
-	/*
-	 * QEMU's emulated cores stop each other all the time (every flush of a page from all the
-	 * TLBs is a rendezvous of all its CPU threads), and the kernel's patience with a spin lock
-	 * is that of real hardware: an eighth of a second by a 24 MHz clock, a twentieth here.
-	 */
-	.timeout_scale = 20,
-};
-
-static const struct platform platform_redwood = {
-	/* io_base must be non-zero: XNU treats a zero SoC base as "no SoC" and skips clock setup. */
-	.name = "redwood", .io_base = 0x00400000, .io_size = 0x3FC00000,
-	.gic_dist = 0x17A00000, .gic_redist = 0x17A60000, .uart = 0, .log_other_cpu = 1,
-	.cores = 8, .core_shift = 8,
-	/*
-	 * Cores 0-3 are Cortex-A55s (1.8 GHz at most), 4-7 Cortex-A78s (2.4 GHz): a big one is about
-	 * 2.5 times as fast. The kernel uses the small ones only when the big ones are all busy
-	 * (XNU's machine_routines.c, ml_choose_slow_core_partners()).
-	 */
-	.small_cores = 0x0f,
-	.fb_base = 0xE1000000,
-};
-
-/*
- * The devices the loader knows, told apart by the framebuffer base their UEFI reports. A port to another
- * device adds its description here (common/new-device.sh writes a starting point, docs/PORTING.md says
- * where each value comes from); a display that matches none is QEMU's ramfb.
- */
-static const struct platform *const platforms[] = {
-	&platform_redwood,
-};
+#include "platform_private.h"
 
 /* ------------------------------------------------------------------------ */
 /* PCI host bridge -> device tree node /pci0 (XNU: bsd/dev/redwood_pci.c)    */
@@ -1068,6 +1216,7 @@ jump_to_kernel(uint64_t entry, uint64_t boot_args_pa)
 #define PSCI_CPU_OFF       0x84000002u
 #define PSCI_CPU_ON        0xC4000003u
 #define PSCI_AFFINITY_INFO 0xC4000004u      /* (MPIDR, 0): 0 = that core is on, 1 = off, 2 = being started */
+#define PSCI_SYSTEM_RESET 0x84000009u
 #define PSCI_NOT_SUPPORTED (-1)
 
 /* each alone in a cache line: one core reads them with its caches off */
@@ -1266,6 +1415,8 @@ static int wdt_armed;
 static const struct kernel_live *running_live;
 static uint64_t running_slide;
 static void usb_poll_command(void);
+static void set_result(const char *what, uint64_t a, uint64_t b);
+static int firmware_fault;
 
 static uint64_t
 seconds_since(uint64_t then)
@@ -2556,14 +2707,9 @@ psci_call(uint64_t function, uint64_t a1, uint64_t a2, uint64_t a3)
 	return status;
 }
 
-/*
- * Run the kernel on the core with that MPIDR and wait until it is back. Returns 0 when it has
- * been and gone (the caller goes on as after loader_return_stub), a negative number if the
- * firmware refused to start the core, OTHER_CPU_NOT_STARTED, or OTHER_CPU_HUNG: then the kernel
- * is still sitting on that core, but what it logged is there to be read (loader_ctx, as after a
- * return). `live` is where the kernel shows its signs of life, if it has such a place;
- * `budget` is how many seconds it has said it will run.
- */
+/* Run the kernel on mpidr: 0 = returned, negative = PSCI refused, OTHER_CPU_NOT_STARTED
+ * or OTHER_CPU_HUNG = incomplete. loader_ctx retains the available log for a hung kernel.
+ * live holds its shared status; budget is the requested run duration in seconds. */
 static int64_t
 run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const struct kernel_live *live, uint64_t slide,
     uint64_t budget)
@@ -2586,6 +2732,13 @@ run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const st
 	clean_dcache((uint64_t)(uintptr_t)&psci_by_hvc, (uint64_t)(uintptr_t)&psci_by_hvc + 8);
 	clean_dcache((uint64_t)(uintptr_t)&other_cpu_entry, (uint64_t)(uintptr_t)&other_cpu_entry + 0x1000);
 	clean_dcache((uint64_t)(uintptr_t)loader_ctx, (uint64_t)(uintptr_t)loader_ctx + sizeof(loader_ctx));
+	/* annibale uses polled USB; keep firmware IRQ handlers out of XNU's GIC setup. */
+	if (PLAT == &platform_annibale) {
+		watching_only = 1;
+		daif = READ_SYSREG(DAIF);
+		group1 = READ_SYSREG(S3_0_C12_C12_7);
+		__asm__ volatile ("msr daifset, #0xf\nmsr S3_0_C12_C12_7, %0\nisb" : : "r" ((uint64_t)0));
+	}
 
 	/* the last argument arrives in that core's x0 */
 	status = psci_call(PSCI_CPU_ON, mpidr, (uint64_t)(uintptr_t)&other_cpu_entry, (uint64_t)(uintptr_t)&other_cpu_start);
@@ -2596,12 +2749,7 @@ run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const st
 		flush_log();
 	}
 	while (status == 0) {
-		/*
-		 * The first seconds are the ones in which a new arrangement goes wrong, and a machine
-		 * that resets takes this loader's memory with it: where there is storage for the log,
-		 * what the kernel is seen to do goes there as it happens. That needs UEFI's services,
-		 * so until NOTE_SECONDS are over this core keeps its interrupts.
-		 */
+		/* Storage logging needs firmware interrupts during NOTE_SECONDS on other platforms. */
 		if (!watching_only && seconds_since(started) >= noted + 2) {
 			noted = seconds_since(started);
 			if (PLAT->log_other_cpu) {
@@ -2613,10 +2761,7 @@ run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const st
 				flush_log();
 			}
 		}
-		/*
-		 * After that this core only watches: no interrupts (the kernel reprograms the interrupt
-		 * controller's shared half; UEFI's handlers had better not run on top of that for long).
-		 */
+		/* Stop firmware interrupts before further use of XNU's shared interrupt controller. */
 		if (!watching_only && seconds_since(started) >= NOTE_SECONDS) {
 			watching_only = 1;
 			daif = READ_SYSREG(DAIF);
@@ -2638,11 +2783,7 @@ run_on_other_cpu(uint64_t mpidr, uint64_t entry, uint64_t boot_args_pa, const st
 				status = OTHER_CPU_NOT_STARTED;
 			}
 		}
-		/*
-		 * The watchdog is this core's to feed for as long as the kernel is expected to run:
-		 * the kernel does it too, but whether that counts from another core is not known.
-		 * After that a kernel that neither returns nor hangs visibly meets the watchdog.
-		 */
+		/* Feed this core's watchdog through the requested budget and a 60-second return margin. */
 		if (wdt_armed && seconds_since(last_pet) >= 5 && seconds_since(started) < budget + 60) {
 			wdt_pet();
 			last_pet = READ_SYSREG(CNTVCT_EL0);
@@ -2776,6 +2917,15 @@ exception_handler(int64_t type, uint64_t *ctx)
 	    ctx[EXC_CTX_ESR], ctx[EXC_CTX_FAR], ctx[EXC_CTX_LR], ctx[EXC_CTX_SP], ctx[EXC_CTX_SPSR]);
 	print("loader image base %x (elr offset %x)\n", (uint64_t)(uintptr_t)&__ImageBase,
 	    ctx[EXC_CTX_ELR] - (uint64_t)(uintptr_t)&__ImageBase);
+	if (PLAT == &platform_annibale && screen_quiet) {
+		/* Preserve the fault for USB retrieval; a new kernel needs a host-requested reboot. */
+		__asm__ volatile ("msr daifset, #0xf");
+		firmware_fault = 1;
+		running_live = NULL;
+		set_result("firmware-fault", (uint64_t)type, ctx[EXC_CTX_ELR]);
+		compose_logs(NULL, 0);
+		for (;;) { usb_poll_command(); }
+	}
 	flush_log();
 	ST->rt->reset_system(0 /* EfiResetCold */, 0, 0, NULL);
 	for (;;) {
@@ -2811,6 +2961,9 @@ struct payload_info {
 	uint64_t checkpoint;
 	uint64_t forced_base;
 	uint64_t resident_rd;           /* size of a root image the host put at the resident address */
+	char rdfile_part[40];           /* a staged system image to read from a real GPT partition (k90-port) */
+	uint64_t rdfile_size;
+	uint64_t rdfile_off;            /* from the partition start; ~0 means aligned to its end */
 	int usb_mode;
 };
 
@@ -2862,6 +3015,30 @@ parse_payload(struct payload_info *pi, int verbose)
 			pi->resident_rd = parse_number(text, 16); /* e.g. loaded there by QEMU; see RESIDENT_RD_OFFSET */
 		} else if (str_eq(e->name, "checkpoint")) {
 			pi->checkpoint = parse_number(text, 10);  /* where the kernel should stop and come back */
+		} else if (str_eq(e->name, "rdfile")) {
+			/*
+			 * "<partition>:<bytes>[:<offset>|tail]": the resident root disk is staged on a
+			 * real GPT partition instead of being left in RAM by the host (k90-port; the
+			 * QEMU milestone preloads it into guest RAM, docs/analysis/rootfs-strategy.md).
+			 */
+			const char *q = text;
+			unsigned n = 0;
+
+			while (*q && *q != ':' && n < sizeof(pi->rdfile_part) - 1) {
+				pi->rdfile_part[n++] = *q++;
+			}
+			pi->rdfile_part[n] = 0;
+			if (*q == ':') {
+				pi->rdfile_size = parse_number(++q, 10);
+				while (*q && *q != ':') {
+					q++;
+				}
+				pi->rdfile_off = ~0ull;
+				if (*q == ':' && !str_eq(++q, "tail")) {
+					pi->rdfile_off = parse_number(q, 10);
+				}
+				pi->resident_rd = pi->rdfile_size;    /* same delivery path as QEMU's rdres */
+			}
 		} else if (str_eq(e->name, "usb")) {
 			pi->usb_mode = 1;                         /* stay in the loader and take commands over USB */
 		}
@@ -2933,7 +3110,10 @@ static void
 set_result(const char *what, uint64_t a, uint64_t b)
 {
 	uint32_t saved = log_len;
-	uint32_t start = log_len;
+	char saved_tail[64];
+	uint32_t start = sizeof(log_buf) - sizeof(saved_tail);
+	memcpy(saved_tail, log_buf + start, sizeof(saved_tail));
+	log_len = start;
 	print("%s %d %x", what, a, b);
 	uint32_t n = log_len - start;
 	if (n > sizeof(last_result) - 1) {
@@ -2941,6 +3121,7 @@ set_result(const char *what, uint64_t a, uint64_t b)
 	}
 	memcpy(last_result, log_buf + start, n);
 	last_result[n] = 0;
+	memcpy(log_buf + start, saved_tail, sizeof(saved_tail));
 	log_len = saved;
 }
 
@@ -3033,6 +3214,91 @@ choose_window(const struct payload_info *pi)
 	return 1;
 }
 
+/* F10-PLAN-BEGIN -- host-extracted verbatim by /tmp/task19/plan_harness.c */
+/*
+ * All of the run's memory layout, and every check that can reject it, computed in one place
+ * before a single byte is cleared, read from disk or copied (review F10: the staged rdfile was
+ * memset at its target and read in from the partition first, and only then did the window-size
+ * check print "not enough contiguous RAM" -- a window smaller than the staged system image had
+ * already been written over). Image length, addition overflow, the window the firmware gave us,
+ * and where every target region lands, including the staged image, are all decided here; the
+ * loader's own read stays behind, in rdfile_load(), reached only once this returned 1.
+ */
+struct run_layout {
+	uint64_t kern_lo, kern_hi;
+	uint64_t rd_pa, rd_size;
+	uint64_t rd1_pa, rd1_size;   /* a second ramdisk when the resident one is not the payload's */
+	uint64_t res_pa, res_size;   /* where the resident image (and with it the staged rdfile) sits */
+	uint64_t dt_pa, ba_pa, top;
+	int rd_resident;
+};
+
+static int
+plan_layout(uint64_t phys_base, uint64_t win_size, uint64_t vm_lo, uint64_t vm_hi, uint64_t ramdisk_size,
+    uint64_t resident_rd, uint64_t rdfile_size, struct run_layout *L)
+{
+	uint64_t slide = phys_base - KERNEL_VIRT_BASE; /* pa = va + slide */
+	uint64_t dt_max = 0x10000;
+
+	L->kern_lo = vm_lo + slide;
+	L->kern_hi = (vm_hi + slide + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
+	/* The ramdisk must sit inside the kernel's static mapping, i.e. below topOfKernelData. */
+	L->rd_pa = L->kern_hi;
+	L->rd_size = (ramdisk_size + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
+	L->rd1_pa = 0;
+	L->rd1_size = 0;
+	L->res_pa = 0;
+	L->res_size = 0;
+	L->rd_resident = 0;
+
+	/* A resident image next to a payload ramdisk: two disks (which is which is decided where the device tree is written). */
+	if (resident_rd != 0) {
+		uint64_t res_pa = phys_base + RESIDENT_RD_OFFSET;
+		uint64_t res_size = (resident_rd + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
+
+		if (res_pa < phys_base || res_pa + res_size < res_pa || res_size > win_size - RESIDENT_RD_OFFSET) {
+			print("layout: resident image escapes the window\n");
+			return 0;
+		}
+		if (L->kern_hi + L->rd_size > res_pa) {
+			print("kernel and ramdisk overlap the resident image\n");
+			return 0;
+		}
+		/* the staged system image is written whole at the resident address: it must fit the
+		 * reserved span and the claimed window, checked before the first clear or read */
+		if (rdfile_size > res_size || rdfile_size > win_size - RESIDENT_RD_OFFSET) {
+			print("rdfile: %x bytes do not fit the window (resident span %x at %x)\n", rdfile_size, res_size,
+			    res_pa - phys_base);
+			return 0;
+		}
+		L->res_pa = res_pa;
+		L->res_size = res_size;
+		if (L->rd_size == 0) {
+			L->rd_pa = res_pa;
+			L->rd_size = res_size;
+			L->rd_resident = 1;
+		} else {
+			L->rd1_pa = res_pa;
+			L->rd1_size = res_size;
+		}
+	}
+	/* everything up to topOfKernelData is the kernel's static region: it must cover both images */
+	L->dt_pa = L->rd1_size != 0 ? L->rd1_pa + L->rd1_size : L->rd_pa + L->rd_size;
+	L->ba_pa = L->dt_pa + dt_max;
+	L->top = L->ba_pa + PAGE_SIZE_MAX;
+	if (L->ba_pa < L->dt_pa || L->top < L->ba_pa || L->top - phys_base > win_size) {
+		print("not enough contiguous RAM\n");
+		return 0;
+	}
+	/* and room to spare under the window's top, as before: 64 MiB of slack */
+	if (win_size - (L->top - phys_base) < 0x4000000ULL) {
+		print("not enough contiguous RAM\n");
+		return 0;
+	}
+	return 1;
+}
+/* F10-PLAN-END */
+
 /*
  * Load and run the kernel from the payload. Returns when the kernel comes
  * back (panic, checkpoint, early exception); the combined log is staged and
@@ -3093,43 +3359,31 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 
 	uint64_t phys_base = win_base;
 	uint64_t slide = phys_base - KERNEL_VIRT_BASE; /* pa = va + slide */
-	uint64_t kern_lo = vm_lo + slide, kern_hi = (vm_hi + slide + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
-	/* The ramdisk must sit inside the kernel's static mapping, i.e. below topOfKernelData. */
-	uint64_t rd_pa = kern_hi;
-	uint64_t rd_size = (pi.ramdisk_size + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
-	int rd_resident = 0;
-	/* A resident image next to a payload ramdisk: two disks (which is which is decided where the device tree is written). */
-	uint64_t rd1_pa = 0, rd1_size = 0;
 
 	if (pi.resident_rd != 0) {
 		resident_rd_size = pi.resident_rd;
 	}
-	if (resident_rd_size != 0) {
-		uint64_t res_pa = phys_base + RESIDENT_RD_OFFSET;
-		uint64_t res_size = (resident_rd_size + PAGE_SIZE_MAX - 1) & ~(PAGE_SIZE_MAX - 1);
+	/* Every check that can reject this run happens in plan_layout(), before any memory of
+	 * the window is cleared and before the staged image is read from its partition (F10). */
+	struct run_layout L;
 
-		if (kern_hi + rd_size > res_pa) {
-			print("kernel and ramdisk overlap the resident image\n");
+	if (!plan_layout(phys_base, win_size, vm_lo, vm_hi, pi.ramdisk_size, resident_rd_size,
+	    resident_rd_size != 0 ? pi.rdfile_size : 0, &L)) {
+		return 0;
+	}
+	uint64_t kern_lo = L.kern_lo, kern_hi = L.kern_hi;
+	uint64_t rd_pa = L.rd_pa, rd_size = L.rd_size;
+	int rd_resident = L.rd_resident;
+	uint64_t rd1_pa = L.rd1_pa, rd1_size = L.rd1_size;
+	uint64_t dt_pa = L.dt_pa;
+	uint64_t ba_pa = L.ba_pa, top = L.top;
+
+	if (L.res_pa != 0 && pi.rdfile_size != 0) {
+		print("rdfile: loading %x bytes to %x\n", pi.rdfile_size, L.res_pa);
+		if (!rdfile_load(pi.rdfile_part, pi.rdfile_off, pi.rdfile_size, L.res_pa)) {
+			print("rdfile: giving up on the staged system image\n");
 			return 0;
 		}
-		if (rd_size == 0) {
-			rd_pa = res_pa;
-			rd_size = res_size;
-			rd_resident = 1;
-		} else {
-			rd1_pa = res_pa;
-			rd1_size = res_size;
-		}
-	}
-	/* everything up to topOfKernelData is the kernel's static region: it must cover both images */
-	uint64_t dt_pa = rd1_size != 0 ? rd1_pa + rd1_size : rd_pa + rd_size;
-	uint64_t dt_max = 0x10000;
-	uint64_t ba_pa = dt_pa + dt_max;
-	uint64_t top = ba_pa + PAGE_SIZE_MAX;
-
-	if (win_size < top - phys_base + 0x4000000ULL) {
-		print("not enough contiguous RAM\n");
-		return 0;
 	}
 
 	/* --- load segments -------------------------------------------------- */
@@ -3170,7 +3424,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	block_write_part = -1;
 	for (const char *c = pi.cmdline; *c; c++) {
 		if (starts_with(c, "bootcpu=") && (c == pi.cmdline || c[-1] == ' ') && c[8] >= '0' && c[8] <= '7') {
-			kernel_mpidr = (uint64_t)(c[8] - '0') << PLAT->core_shift;
+			kernel_mpidr = PLAT->core_mpidr[c[8] - '0'];
 		}
 		more_cores |= (starts_with(c, "cpus=") || starts_with(c, "cpumask=")) && (c == pi.cmdline || c[-1] == ' ');
 		battery_requested |= starts_with(c, "battery=1") && (c == pi.cmdline || c[-1] == ' ') &&
@@ -3491,18 +3745,20 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	 * this loader stays on while it watches is not the kernel's, nor any the firmware runs.
 	 */
 	uint64_t cpu_mpidr[8] = { kernel_mpidr };
-	int cpu_count = 1, boot_core = (int)(kernel_mpidr >> plat->core_shift);
+	int cpu_count = 1, boot_core = platform_core_index(plat, kernel_mpidr);
 
 	if (more_cores) {
 		for (int distance = 1; distance < plat->cores; distance++) {
 			for (int side = 0; side < 2; side++) {
 				int core = side == 0 ? boot_core + distance : boot_core - distance;
-				uint64_t mpidr = (uint64_t)core << plat->core_shift;
+				uint64_t mpidr;
 				int64_t state;
 
-				if (core < 0 || core >= plat->cores || mpidr == this_mpidr) {
+				if (core < 0 || core >= plat->cores) {
 					continue;
 				}
+				mpidr = plat->core_mpidr[core];
+				if (mpidr == this_mpidr) { continue; }
 				state = psci_call(PSCI_AFFINITY_INFO, mpidr, 0, 0);
 				if (state == 1 || state == PSCI_NOT_SUPPORTED) {
 					cpu_mpidr[cpu_count++] = mpidr;
@@ -3533,7 +3789,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		dt_prop_u64(&w, "bus-frequency", 100000000ULL);
 		dt_prop_u64(&w, "memory-frequency", 100000000ULL);
 		dt_prop_u64(&w, "peripheral-frequency", 24000000ULL);
-		if (plat->small_cores & (1u << ((cpu_mpidr[i] >> plat->core_shift) & 31))) {
+		if (plat->small_cores & (1u << platform_core_index(plat, cpu_mpidr[i]))) {
 			dt_prop_u32(&w, "small-core", 1);
 		}
 		dt_end(&w);
@@ -3558,8 +3814,10 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_begin(&w, "gic");
 	dt_prop_str(&w, "device_type", "interrupt-controller");
 	dt_prop_str(&w, "compatible", "arm,gic-v3");
-	uint64_t gic_reg[4] = { plat->gic_dist - plat->io_base, 0x10000, plat->gic_redist - plat->io_base, 0x100000 };
+	uint64_t gic_reg[4] = { plat->gic_dist - plat->io_base, 0x10000, plat->gic_redist - plat->io_base,
+	    plat->gic_redist_size ? plat->gic_redist_size : 0x100000 };
 	dt_prop(&w, "reg", gic_reg, sizeof(gic_reg));
+	dt_prop_u64(&w, "redistributor-stride", plat->gic_redist_stride ? plat->gic_redist_stride : 0x20000);
 	dt_end(&w);
 	if (plat->uart != 0) {
 		dt_begin(&w, "uart0");
@@ -3915,16 +4173,17 @@ starts_with(const char *s, const char *prefix)
 static void
 fb_command(char *cmd)
 {
-	int busy = running_live != NULL;
+	int busy = running_live != NULL || firmware_fault;
 
 	{
 		if (busy && (starts_with(cmd, "oem ramdisk") || starts_with(cmd, "download:") || starts_with(cmd, "oem run") ||
 		    starts_with(cmd, "oem selftest") || starts_with(cmd, "oem hang") || starts_with(cmd, "oem recording") ||
-		    starts_with(cmd, "oem sound") || starts_with(cmd, "oem clearscreen") || starts_with(cmd, "oem memmap"))) {
+		    starts_with(cmd, "oem sound") || starts_with(cmd, "oem clearscreen") || starts_with(cmd, "oem memmap") ||
+		    starts_with(cmd, "oem probe") || starts_with(cmd, "oem logwrite"))) {
 			fb_reply("FAIL", "a kernel is running (oem stop ends it)");
 		} else if (starts_with(cmd, "oem stop")) {
 			/* the kernel looks at this once a second and comes back as it does when its time is up */
-			if (busy) {
+			if (running_live != NULL) {
 				((struct kernel_live *)(uintptr_t)running_live)->stop = 1;
 			}
 			fb_reply("OKAY", "");
@@ -4001,6 +4260,11 @@ fb_command(char *cmd)
 			}
 		} else if (starts_with(cmd, "upload")) {
 			uint64_t sent = 0;
+			/* fastboot rejects DATA00000000 without reading the final status. */
+			if (staged_len == 0) {
+				fb_reply("FAIL", "no staged data");
+				return;
+			}
 			fb_reply_data(staged_len);
 			while (sent < staged_len) {
 				uint64_t chunk = staged_len - sent > USB_CHUNK ? USB_CHUNK : staged_len - sent;
@@ -4067,8 +4331,21 @@ fb_command(char *cmd)
 			/* the firmware's memory map into the log (then "oem log" and fetch it) */
 			print_memory_map();
 			fb_reply("OKAY", "");
+		} else if (starts_with(cmd, "oem logwrite")) {
+			/*
+			 * The only path that lets the log land on boot_a where no logdump partition
+			 * exists (review F09, ruling b); the caller knows boot_a may hold the boot image.
+			 */
+			fb_reply("OKAY", "");
+			log_fallback_boot_a_allowed = 1;
+			flush_log();
+			log_fallback_boot_a_allowed = 0;
+		} else if (starts_with(cmd, "oem probe")) {
+			/* the only writable storage check, and it puts back what it moved (review F09) */
+			fb_reply("OKAY", "");
+			probe_boot_a();
 		} else if (starts_with(cmd, "oem log")) {
-			if (busy) {
+			if (running_live != NULL) {
 				compose_live_log(running_live, running_slide);
 			} else {
 				compose_logs(NULL, 0);
@@ -4076,8 +4353,16 @@ fb_command(char *cmd)
 			fb_reply("OKAY", "");
 		} else if (starts_with(cmd, "reboot") || starts_with(cmd, "oem reboot")) {
 			fb_reply("OKAY", "");
-			BS->stall(200000);
-			ST->rt->reset_system(0 /* EfiResetCold */, 0, 0, NULL);
+			if (PLAT == &platform_annibale) {
+				/* Match ArmPsciResetSystemLib without invoking UEFI reset callbacks. */
+				int64_t status = psci_call(PSCI_SYSTEM_RESET, 0, 0, 0);
+				print("PSCI SYSTEM_RESET returned %d; USB command loop retained\n", (uint64_t)status);
+				set_result("reset-failed", (uint64_t)status, 0);
+				compose_logs(NULL, 0);
+			} else {
+				BS->stall(200000);
+				ST->rt->reset_system(0 /* EfiResetCold */, 0, 0, NULL);
+			}
 		} else {
 			fb_reply("FAIL", "unknown command");
 		}
@@ -4259,6 +4544,20 @@ efi_main(efi_handle image, efi_system_table *st)
 	if (EFI_ERROR(BS->locate_protocol(&gop_guid, NULL, (void **)&GOP)) || GOP->mode == NULL ||
 	    GOP->mode->info == NULL || GOP->mode->fb_base == 0) {
 		GOP = NULL;                     /* no display (QEMU without -device ramfb) */
+#ifdef DIRECT_PHONE_PLAT
+		/*
+		 * A phone build must select annibale even without GOP. The device tree reserves
+		 * splash_region at 0xfc800000+0x2b00000, matching MemoryMapLib's Display_Reserved.
+		 * The P11 mode is 1156x2510. BootArgs.video uses that buffer for kernel output;
+		 * visible scanout still depends on the panel state left by LK.
+		 */
+		PLAT = &platform_annibale;
+		SCREEN.base = platform_annibale.fb_base;
+		SCREEN.width = 1156;              /* P11 mode from the device tree and Android DRM */
+		SCREEN.height = 2510;
+		SCREEN.stride = 1156 * 4;
+		print("display assumed at %x: LK splash region\n", SCREEN.base);
+#endif
 	} else {
 		SCREEN.base = GOP->mode->fb_base;
 		SCREEN.width = GOP->mode->info->width;
@@ -4267,12 +4566,19 @@ efi_main(efi_handle image, efi_system_table *st)
 		for (unsigned i = 0; i < sizeof(platforms) / sizeof(platforms[0]); i++)
 			if (platforms[i]->fb_base == SCREEN.base)
 				PLAT = platforms[i];
+#ifdef DIRECT_PHONE_PLAT
+		/* built for one phone: a framebuffer none of the known ones matches is ours */
+		if (PLAT == &platform_qemu_virt)
+			PLAT = &platform_annibale;
+#else
 		if (PLAT == &platform_qemu_virt)
 			ramfb_phone_screen();
+#endif
 		print("display %d x %d at %x\n", (uint64_t)SCREEN.width, (uint64_t)SCREEN.height, SCREEN.base);
 	}
 	print("platform %s\n", PLAT->name);
 	pci_probe(PLAT);
+	skip_ufs_arbitration = (PLAT == &platform_annibale); /* ramdisk kernel, no UFS handover (k90-port) */
 
 	install_exception_hook();
 	wdt_arm();
@@ -4280,6 +4586,7 @@ efi_main(efi_handle image, efi_system_table *st)
 	int have_payload = parse_payload(&pi, 0);
 	if (have_payload && pi.usb_mode && usb_start()) {
 		flush_log();
+		inspect_storage(); /* read-only since review F09; the writes live behind "oem probe" */
 		usb_command_loop();
 	}
 

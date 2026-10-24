@@ -1,0 +1,54 @@
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index fc2096fa0010..5011ab612305 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -93,6 +93,8 @@
+ 
+ #include <pexpert/device_tree.h>
+ 
++MARK_AS_PMAP_TEXT static void pmap_phys_write_disable(vm_address_t va);
++
+ #include <san/kasan.h>
+ #include <sys/cdefs.h>
+ 
+@@ -4676,8 +4678,8 @@ pmap_page_protect_options_with_flush_range(
+ 			}
+ #endif
+ 			if (remove && (options & PMAP_OPTIONS_COMPRESSOR)) {
+-				panic("pmap_page_protect: attempt to compress ppnum 0x%x owned by iommu %p, pve_p=%p",
+-				    ppnum, ptep_get_iommu(pte_p), pve_p);
++				panic("pmap_page_protect: attempt to compress ppnum 0x%x owned by iommu, pte_p=%p, pve_p=%p",
++				    ppnum, pte_p, pve_p);
+ 			}
+ 			goto protect_skip_pve_pass1;
+ 		}
+@@ -6877,7 +6879,8 @@ void
+ pmap_sync_page_attributes_phys(
+ 	ppnum_t pp)
+ {
+-	flush_dcache((vm_offset_t) (pp << PAGE_SHIFT), PAGE_SIZE, TRUE);
++	/* (redwood: the page number is 32 bits wide and memory goes on above 4 GB: widen before shifting) */
++	flush_dcache((vm_offset_t) pp << PAGE_SHIFT, PAGE_SIZE, TRUE);
+ }
+ 
+ #if CONFIG_COREDUMP
+@@ -11623,7 +11626,8 @@ pmap_cs_lockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
+ #if XNU_MONITOR
+ 	pmap_ppl_lockdown_pages(kva, size, PVH_FLAG_LOCKDOWN_CS, ppl_writable);
+ #else
+-	pmap_ppl_lockdown_pages(kva, size, 0, ppl_writable);
++	/* No PPL on this platform: nothing to lock down. */
++	(void)kva; (void)size; (void)ppl_writable;
+ #endif
+ }
+ 
+@@ -11633,7 +11637,8 @@ pmap_cs_unlockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
+ #if XNU_MONITOR
+ 	pmap_ppl_unlockdown_pages(kva, size, PVH_FLAG_LOCKDOWN_CS, ppl_writable);
+ #else
+-	pmap_ppl_unlockdown_pages(kva, size, 0, ppl_writable);
++	/* No PPL on this platform: nothing to lock down. */
++	(void)kva; (void)size; (void)ppl_writable;
+ #endif
+ }
+ 

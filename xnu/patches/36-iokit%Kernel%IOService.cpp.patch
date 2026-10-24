@@ -1,0 +1,16 @@
+diff --git a/iokit/Kernel/IOService.cpp b/iokit/Kernel/IOService.cpp
+index d2442944e5f0..e90ba6738516 100644
+--- a/iokit/Kernel/IOService.cpp
++++ b/iokit/Kernel/IOService.cpp
+@@ -5179,7 +5179,10 @@ IOService::setRootMedia(IOService * root)
+ 	bool unhide;
+ 
+ 	ioblockstoragedriverClass = OSMetaClass::getMetaClassWithName(gIOBlockStorageDriverKey);
+-	assert(ioblockstoragedriverClass);
++	if (!ioblockstoragedriverClass) {
++		// No IOStorageFamily in this kernel: the root cannot be a block storage device
++		root = NULL;
++	}
+ 
+ 	while (root) {
+ 		if (root->metaCast(ioblockstoragedriverClass)) {

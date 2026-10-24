@@ -1,0 +1,13 @@
+diff --git a/bsd/vfs/vfs_lookup.c b/bsd/vfs/vfs_lookup.c
+index a05c8e767b33..5f2846cb8893 100644
+--- a/bsd/vfs/vfs_lookup.c
++++ b/bsd/vfs/vfs_lookup.c
+@@ -1670,7 +1670,7 @@ lookup_handle_symlink(struct nameidata *ndp, vnode_t *new_dp, bool *new_dp_has_i
+ 	int error;
+ 	char *cp;               /* pointer into pathname argument */
+ 	uio_t auio;
+-	uio_stackbuf_t uio_buf[UIO_SIZEOF(1)];
++	uio_stackbuf_t uio_buf[(UIO_SIZEOF(1) + sizeof(uio_stackbuf_t) - 1) / sizeof(uio_stackbuf_t)];
+ 	int need_newpathbuf;
+ 	u_int linklen = 0;
+ 	struct componentname *cnp = &ndp->ni_cnd;

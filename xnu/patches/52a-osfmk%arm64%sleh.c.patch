@@ -1,0 +1,22 @@
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index 2cc442e05791..0d0fb32cf206 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -122,7 +122,7 @@ _Static_assert(ARM64_KDBG_CODE_GUEST <= KDBG_CODE_MAX, "arm64 KDBG trace codes o
+ _Static_assert(ARM64_KDBG_CODE_GUEST <= UINT16_MAX, "arm64 KDBG trace codes out of range");
+ 
+ void panic_with_thread_kernel_state(const char *msg, arm_saved_state_t *ss) __abortlike;
+-
++extern void loader_fault_log(const char *, uint64_t, uint64_t, uint32_t, uint64_t);
+ void sleh_synchronous_sp1(arm_context_t *, uint32_t, vm_offset_t) __abortlike;
+ void sleh_synchronous(arm_context_t *, uint32_t, vm_offset_t);
+ 
+@@ -465,7 +465,7 @@ panic_with_thread_kernel_state(const char *msg, arm_saved_state_t *ss)
+ 
+ 	ss_valid = is_saved_state64(ss);
+ 	arm_saved_state64_t *state = saved_state64(ss);
+-
++	loader_fault_log(msg, state->pc, state->lr, state->esr, state->far);
+ 	os_atomic_cmpxchg(&original_faulting_state, NULL, state, seq_cst);
+ 
+ 	// rdar://80659177

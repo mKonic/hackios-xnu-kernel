@@ -1,0 +1,13 @@
+diff --git a/config/MASTER b/config/MASTER
+index 07147cb3188b..e937e62bf4c3 100644
+--- a/config/MASTER
++++ b/config/MASTER
+@@ -113,6 +113,8 @@ options		CONFIG_WORKLOOP_DEBUG	# <config_workloop_debug>
+ #	4.4 filesystems
+ #
+ options		MOCKFS		# Boot from an executable	# <mockfs>
++options		APFS		# Apple File System, read only	# <apfs>
++options		RAMFS		# Read-write filesystem in memory	# <ramfs>
+ options		FIFO		# fifo support			# <fifo>
+ options		FDESC		# fdesc_fs support		# <fdesc>
+ options		DEVFS		# devfs support			# <devfs>

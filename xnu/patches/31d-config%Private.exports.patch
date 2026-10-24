@@ -1,0 +1,32 @@
+diff --git a/config/Private.exports b/config/Private.exports
+--- a/config/Private.exports
++++ b/config/Private.exports
+@@ -1,3 +1,6 @@
++# Generic ARM64 port: only implemented kernel interfaces are exported.
++# Omitted entries require unavailable generated DriverKit RPC or Apple
++# PPL/DART implementations. Keep symbol-set/export checks enabled.
+ _PE_i_can_has_debugger
+ __ZN15IORegistryEntry18setIndexedPropertyEjP8OSObject
+ __ZNK15IORegistryEntry18getIndexedPropertyEj
+@@ -165,9 +168,6 @@
+ __ZTV16IOUserClient2022
+ __ZTVN16IOUserClient20229MetaClassE
+
+-__ZN38OSAction_IOUserClient_KernelCompletion10gMetaClassE
+-__ZN38OSAction_IOUserClient_KernelCompletion10superClassE
+-__ZTV38OSAction_IOUserClient_KernelCompletion
+ __ZN27IOGuardPageMemoryDescriptor10gMetaClassE
+ __ZN27IOGuardPageMemoryDescriptor10superClassE
+ __ZN27IOGuardPageMemoryDescriptor4freeEv
+@@ -773,11 +773,9 @@
+ _pmap_claim_reserved_ppl_page
+ _pmap_free_reserved_ppl_page
+ _pmap_in_ppl
+-_pmap_has_iofilter_protected_write
+ _pmap_iofilter_protected_write
+ _pmap_lookup_in_static_trust_cache
+ _pmap_lookup_in_loaded_trust_caches
+-_pmap_cs_configuration
+ _port_name_to_task:_port_name_to_task_external
+ _port_name_to_thread
+ _post_sys_powersource

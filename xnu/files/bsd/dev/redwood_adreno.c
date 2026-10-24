@@ -4028,6 +4028,10 @@ redwood_adreno_init(void)
 	uint32_t only = 0, done = 0, failed = 0, keep = 0;
 	bool by_itself = false;
 
+	if (redwood_platform_blocks_legacy_drivers()) {
+		printf("adreno: legacy Adreno 660 initialization skipped by platform guard\n");
+		return;
+	}
 	if (PE_parse_boot_argn("display_probe", &only, sizeof(only)) && only) {
 		display_probe();
 	}

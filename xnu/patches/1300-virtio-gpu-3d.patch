@@ -2,9 +2,9 @@ diff --git a/bsd/conf/files b/bsd/conf/files
 index d8e23ea..80fb6a0 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -139,6 +139,8 @@ bsd/dev/redwood_virtio_blk.c	standard
- bsd/dev/redwood_sparse.c	standard
- bsd/dev/redwood_apfs_check.c	optional apfs
+@@ -152,6 +152,8 @@ bsd/dev/redwood_sparse.c	standard
+ bsd/dev/redwood_apfs_check_walk.c	optional apfs
+ bsd/dev/redwood_apfs_check_write.c	optional apfs
  bsd/dev/redwood_sound.c		standard
 +bsd/dev/redwood_vgpu3d.c	standard
 +bsd/dev/redwood_vgpu3d_xnu.c	standard

@@ -1,0 +1,43 @@
+diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
+index 0a00656a0fdd..0d220866b5d6 100644
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -1060,7 +1060,7 @@ panic_with_thread_context(unsigned int reason, void *ctx, uint64_t debugger_opti
+ 	va_end(panic_str_args);
+ }
+ #endif /* defined (__x86_64__) */
+-
++extern void loader_panic_log(const char *, va_list *, unsigned long);
+ #pragma clang diagnostic push
+ #pragma clang diagnostic ignored "-Wmissing-noreturn"
+ void
+@@ -1068,7 +1068,7 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+     uint64_t panic_options_mask, void *panic_data_ptr, unsigned long panic_caller)
+ {
+ #pragma clang diagnostic pop
+-
++	loader_panic_log(panic_format_str, panic_args, panic_caller);
+ #if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
+ 	read_lbr();
+ #endif
+@@ -1147,9 +1147,12 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+ 	__builtin_unreachable();
+ }
+ 
++extern void loader_return(void);
++
+ void
+ panic_spin_forever(void)
+ {
++	loader_return();
+ 	for (;;) {
+ #if defined(__arm__) || defined(__arm64__)
+ 		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */
+@@ -1163,6 +1166,7 @@ panic_spin_forever(void)
+ static void
+ kdp_machine_reboot_type(unsigned int type, uint64_t debugger_flags)
+ {
++	loader_return();
+ 	if ((type == kPEPanicRestartCPU) && (debugger_flags & DEBUGGER_OPTION_SKIP_PANICEND_CALLOUTS)) {
+ 		PEHaltRestart(kPEPanicRestartCPUNoCallouts);
+ 	} else {

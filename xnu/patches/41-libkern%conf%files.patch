@@ -1,0 +1,13 @@
+diff --git a/libkern/conf/files b/libkern/conf/files
+index ece14c7d41d3..4a903f73a9ef 100644
+--- a/libkern/conf/files
++++ b/libkern/conf/files
+@@ -109,6 +109,8 @@ libkern/apple_encrypted_archive/apple_encrypted_archive.c	standard
+ libkern/img4/interface.c 		standard
+ 
+ libkern/amfi/amfi.c 		standard
++libkern/amfi/miniamfi.c 		standard
++libkern/amfi/miniamfi_entitlements.cpp 	standard
+ 
+ libkern/stack_protector.c       standard
+ libkern/ptrauth_utils.c         standard

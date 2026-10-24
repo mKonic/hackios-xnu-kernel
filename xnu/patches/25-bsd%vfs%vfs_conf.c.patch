@@ -1,0 +1,114 @@
+diff --git a/bsd/vfs/vfs_conf.c b/bsd/vfs/vfs_conf.c
+index bae70cda3a96..031613b10643 100644
+--- a/bsd/vfs/vfs_conf.c
++++ b/bsd/vfs/vfs_conf.c
+@@ -103,6 +103,15 @@ extern  struct vfsops mockfs_vfsops;
+ extern  int mockfs_mountroot(mount_t, vnode_t, vfs_context_t);
+ #endif /* MOCKFS */
+ 
++#if RAMFS
++extern  struct vfsops ramfs_vfsops;
++#endif /* RAMFS */
++
++#if APFS
++extern  struct vfsops apfs_vfsops;
++extern  int apfs_mountroot(mount_t, vnode_t, vfs_context_t);
++#endif /* APFS */
++
+ enum fs_type_num {
+ 	FT_NFS = 2,
+ 	FT_DEVFS = 19,
+@@ -110,7 +119,9 @@ enum fs_type_num {
+ 	FT_ROUTEFS = 21,
+ 	FT_NULLFS = 22,
+ 	FT_BINDFS = 23,
+-	FT_MOCKFS  = 0x6D6F636B
++	FT_MOCKFS  = 0x6D6F636B,
++	FT_RAMFS   = 0x72616D66,
++	FT_APFS    = 0x61706673
+ };
+ 
+ int fstypenumstart = FT_BINDFS + 1;
+@@ -194,6 +205,54 @@ static struct vfstable vfstbllist[] = {
+ 	},
+ #endif /* BINDFS */
+ 
++#if RAMFS
++	/* Read-write filesystem in memory (no device, no mount arguments) */
++	{
++		.vfc_vfsops = &ramfs_vfsops,
++		.vfc_name = "ramfs",
++		.vfc_typenum = FT_RAMFS,
++		.vfc_refcount = 0,
++		.vfc_flags = MNT_LOCAL,
++		.vfc_mountroot = NULL,
++		.vfc_next = NULL,
++		.vfc_reserved1 = 0,
++		.vfc_reserved2 = 0,
++		.vfc_vfsflags = VFC_VFSGENERICARGS | VFC_VFS64BITREADY | VFC_VFSNATIVEXATTR,
++		.vfc_descptr = NULL,
++		.vfc_descsize = 0,
++		.vfc_sysctl = NULL
++	},
++#endif /* RAMFS */
++
++#if APFS
++	/*
++	 * Apple File System, read only: the root and every image of this port's (the RAM
++	 * disks are APFS containers).  Before mockfs, which accepts any root device: a device
++	 * that is not APFS comes back EINVAL and vfs_mountroot() goes on to the next.
++	 */
++	{
++		.vfc_vfsops = &apfs_vfsops,
++		.vfc_name = "apfs",
++		.vfc_typenum = FT_APFS,
++		.vfc_refcount = 0,
++		.vfc_flags = MNT_LOCAL | MNT_RDONLY,
++		.vfc_mountroot = apfs_mountroot,
++		.vfc_next = NULL,
++		.vfc_reserved1 = 0,
++		.vfc_reserved2 = 0,
++		/*
++		 * Generic args, not local: a kernel mount of a filesystem marked
++		 * VFC_VFSLOCALARGS is refused outright (mount_common), and this one has to be
++		 * mountable from the kernel.  So apfs_mount() takes the device's path as its
++		 * mount data and opens it itself.
++		 */
++		.vfc_vfsflags = VFC_VFSGENERICARGS | VFC_VFS64BITREADY | VFC_VFSNATIVEXATTR,
++		.vfc_descptr = NULL,
++		.vfc_descsize = 0,
++		.vfc_sysctl = NULL
++	},
++#endif /* APFS */
++
+ #if MOCKFS
+ 	/* If we are configured for it, mockfs should always be the last standard entry (and thus the last FS we attempt mountroot with) */
+ 	{
+@@ -298,6 +357,15 @@ extern const struct vnodeopv_desc devfs_fdesc_vnodeop_opv_desc;
+ extern const struct vnodeopv_desc mockfs_vnodeop_opv_desc;
+ #endif /* MOCKFS */
+ 
++
++#if RAMFS
++extern const struct vnodeopv_desc ramfs_vnodeop_opv_desc;
++#endif /* RAMFS */
++
++#if APFS
++extern const struct vnodeopv_desc apfs_vnodeop_opv_desc;
++#endif /* APFS */
++
+ extern const struct vnodeopv_desc nullfs_vnodeop_opv_desc;
+ extern const struct vnodeopv_desc bindfs_vnodeop_opv_desc;
+ 
+@@ -327,5 +395,11 @@ const struct vnodeopv_desc *vfs_opv_descs[] = {
+ #if MOCKFS
+ 	&mockfs_vnodeop_opv_desc,
+ #endif /* MOCKFS */
++#if RAMFS
++	&ramfs_vnodeop_opv_desc,
++#endif /* RAMFS */
++#if APFS
++	&apfs_vnodeop_opv_desc,
++#endif /* APFS */
+ 	NULL
+ };

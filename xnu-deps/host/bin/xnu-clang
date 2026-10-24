@@ -6,10 +6,21 @@
 #  - XNU_CLANG_DIR: where that clang is (default /usr/bin; shell.nix sets it)
 HB="$(cd "$(dirname "$0")" && pwd)"
 case "$(basename "$0")" in *++) drv=clang++; extra=(-fno-use-cxa-atexit);; *) drv=clang; extra=();; esac
+# -ftrivial-auto-var-init=zero wants the long opt-in flag on clang 11..19 and none on 20+; ask our
+# compiler once and remember its answer
+probe=/tmp/.xnu-clang-varinit.$(id -u).$drv
+if [ ! -f "$probe" ]; then
+  if echo 'int f(void){return 0;}' | /usr/bin/$drv -x c -c - -o /dev/null -ftrivial-auto-var-init=zero -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang 2>/dev/null; then
+    echo keep > "$probe"
+  else
+    echo drop > "$probe"
+  fi
+fi
+keep_init_flag=$(cat "$probe")
 args=()
 for a in "$@"; do
   case "$a" in
-    -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang) ;;
+    -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang) [ "$keep_init_flag" = keep ] && args+=("$a");;
     -fapple-kext-vtable-verify|-Wno-vla-cxx-extension) ;;
     -Werror|-Werror=*|-Weverything|-pedantic-errors) ;;
     *) args+=("$a");;

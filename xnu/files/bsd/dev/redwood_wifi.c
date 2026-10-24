@@ -4274,6 +4274,10 @@ redwood_wifi_init(void)
 		printf("wifi: wifi=%u is not understood: wifi=1 turns the radio on, wifi_step=N goes the first N steps of that\n", on);
 		return;
 	}
+	if (redwood_platform_blocks_legacy_drivers()) {
+		printf("wifi: wifi=1 and wifi_step=N require the redwood platform; legacy radio initialization skipped\n");
+		return;
+	}
 	if (pe_arm_get_soc_base_phys() != REDWOOD_SOC_BASE) {
 		if (last_step != 0 && PE_parse_boot_argn("wifi_lx", &back, sizeof(back)) && back) {
 			/* a check of what is under the driver: it gets as far as finding no firmware to talk to */

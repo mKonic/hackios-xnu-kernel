@@ -16,6 +16,27 @@
 #include <unistd.h>
 extern char *program_invocation_short_name;
 static inline const char *getprogname(void) { return program_invocation_short_name; }
+/* BSD strlcpy/strlcat: glibc grew them only in 2.38, and SETUP tools (replacecontents) call them */
+#if defined(__GLIBC__) && (!defined(__GLIBC_PREREQ) || !__GLIBC_PREREQ(2, 38))
+static inline size_t strlcpy(char *dst, const char *src, size_t size) {
+	size_t n = strlen(src);
+	if (size) {
+		size_t copy = n < size - 1 ? n : size - 1;
+		memcpy(dst, src, copy);
+		dst[copy] = '\0';
+	}
+	return n;
+}
+static inline size_t strlcat(char *dst, const char *src, size_t size) {
+	size_t d = strnlen(dst, size), s = strlen(src);
+	if (d < size) {
+		size_t copy = s < size - d - 1 ? s : size - d - 1;
+		memcpy(dst + d, src, copy);
+		dst[d + copy] = '\0';
+	}
+	return d + s;
+}
+#endif
 #ifndef __unused
 #define __unused __attribute__((unused))
 #endif

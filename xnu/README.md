@@ -2,7 +2,7 @@
 
 Our changes to XNU `xnu-8796.121.2` (the iOS 16.5 kernel, Darwin 22.5.0):
 
-- `redwood.patch` -- changes to Apple's files;
+- `patches/` -- changes to Apple's files, one piece per file, applied in the order `patches/series` names them (the single `redwood.patch` this directory used to hold is retired: per-file pieces mean two people editing two files never touch the same piece);
 - `files/` -- new files, at their paths in the XNU tree;
 - `apply.sh` -- takes Apple's sources and applies all of this; `export.sh` -- the reverse.
 
@@ -52,17 +52,12 @@ Things to know:
 ## Working on the tree
 
 Changes are made directly in `xnu-src/xnu-8796.121.2` (an ordinary git tree of Apple's, on branch `redwood`).
-Before committing to this repository run `xnu/export.sh` (it regenerates the patch and `files/`); to update
+Before committing to this repository run `xnu/export.sh` (it regenerates `patches/` and `files/`); to update
 the ready-made kernel in `prebuilt/`, `tools/update-prebuilt.sh`.
 
 **Two traps, each of which cost a build.**
 
-`export.sh` regenerates the patch **from your whole tree**, not from your changes. If the tree has fallen
-behind the branch -- somebody changed the kernel after you set yours up -- the export silently rolls back
-their work: the patch comes out without their files. Before exporting, bring the tree to the current patch
-(`git checkout -- .` in `xnu-src`, then `git apply xnu/redwood.patch` and `cp -a xnu/files/. .`); if the change
-is a single one, it is more honest to paste its diff into the patch by hand and say so in the commit. The sign
-of a tree that fell behind is a kernel that builds and **crashes at boot** right after `Stackshot Succeeded`.
+`export.sh` regenerates the series **from your whole tree**, not from your changes. If the tree has fallen behind the branch -- somebody changed the kernel after you set yours up -- the export silently rolls back their work: the series comes out without their pieces. Before exporting, bring the tree to the current series (`git checkout -- .` in `xnu-src`, then apply every piece -- `while read p; do git apply "xnu/patches/$p"; done < xnu/patches/series` -- and `cp -a xnu/files/. .`); if the change is a single file, it is more honest to paste its diff into that file's piece by hand and say so in the commit. The sign of a tree that fell behind is a kernel that builds and **crashes at boot** right after `Stackshot Succeeded`.
 
 The kernel build here **normally ends with the error** `check_all_exports` (IOKit symbols in `config/`): that is
 a check of the export lists, not compilation. `mach.development.bcm2837` is linked and usable by then.
@@ -91,7 +86,7 @@ The error was there before any of our changes.
 | `bsd/dev/redwood_audio.c`, `redwood_virtio_sound.c`, `redwood_speaker.c` | sound: `/dev/redwood-audio` (where our output device in mediaserverd writes what iOS plays), recording it to memory, virtio-sound for QEMU; a first look at the phone's speaker amplifiers |
 | `bsd/pthread/pthread_kext_static.c` | the pthread kext, linked into the kernel |
 
-Besides the hooks for all of this, the patch fixes what stops the open XNU from building and running outside
+Besides the hooks for all of this, the pieces in `patches/` fix what stops the open XNU from building and running outside
 Apple: makefiles for Linux, the `BCM2837` configuration (taken as the base), bugs in abandoned code (mockfs,
 the non-PPL pmap, percpu on a single processor) and so on.
 

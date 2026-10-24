@@ -216,6 +216,12 @@ FlushLog ()
 
   BlockIo = FindPartition (XNU_LOG_PARTITION);
   if (BlockIo == NULL) {
+    // k90-port: annibale has no logdump partition -- the free boot_a slot
+    // doubles as the log area (it holds nothing but experiments).
+    BlockIo = FindPartition (L"boot_a");
+  }
+
+  if (BlockIo == NULL) {
     return;
   }
 

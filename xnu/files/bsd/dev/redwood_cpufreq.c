@@ -560,6 +560,10 @@ redwood_cpufreq_init(void)
 	const ml_topology_info_t *topology = ml_get_topology_info();
 	uint32_t enabled = 0, cores[EPSS_DOMAINS] = { 0 }, before, here;
 
+	if (redwood_platform_blocks_legacy_drivers()) {
+		printf("cpufreq: legacy RPMh/EPSS initialization skipped by platform guard\n");
+		return;
+	}
 	load_start();
 	enabled = 2;
 	PE_parse_boot_argn("ddr", &enabled, sizeof(enabled));

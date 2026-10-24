@@ -1,0 +1,70 @@
+diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
+index 07aa0be4a0ca..3832eaff2184 100644
+--- a/iokit/Kernel/IOUserClient.cpp
++++ b/iokit/Kernel/IOUserClient.cpp
+@@ -3536,6 +3536,25 @@ IOCopyPropertyCompatible(IORegistryEntry * regEntry, const char * name)
+ 	return obj;
+ }
+ 
++/*
++ * Boot-arg regtrace=1: report the registry properties user space asks for and does not
++ * find (regtrace=2: every property asked for). Shows what a daemon expects of a driver.
++ */
++static TUNABLE(uint32_t, regtrace_level, "regtrace", 0);
++
++static void
++regtrace_report(IORegistryEntry * entry, const char * property, bool found)
++{
++	char procname[32] = "?";
++
++	if (regtrace_level == 0 || (found && regtrace_level < 2)) {
++		return;
++	}
++	proc_selfname(procname, sizeof(procname));
++	IOLog("regtrace: %s[%d] %s(%s).%s %s\n", procname, proc_selfpid(), entry->getName(),
++	    entry->getMetaClass()->getClassName(), property, found ? "found" : "MISSING");
++}
++
+ /* Routine io_registry_entry_get_property */
+ kern_return_t
+ is_io_registry_entry_get_property_bytes(
+@@ -3563,6 +3582,7 @@ is_io_registry_entry_get_property_bytes(
+ #endif
+ 
+ 	obj = IOCopyPropertyCompatible(entry, property_name);
++	regtrace_report(entry, property_name, obj != NULL);
+ 	if (!obj) {
+ 		return kIOReturnNoResources;
+ 	}
+@@ -3631,6 +3651,7 @@ is_io_registry_entry_get_property(
+ #endif
+ 
+ 	obj = IOCopyPropertyCompatible(entry, property_name);
++	regtrace_report(entry, property_name, obj != NULL);
+ 	if (!obj) {
+ 		return kIOReturnNotFound;
+ 	}
+@@ -3679,6 +3700,7 @@ is_io_registry_entry_get_property_recursively(
+ 
+ 	obj = entry->copyProperty( property_name,
+ 	    IORegistryEntry::getPlane( plane ), options );
++	regtrace_report(entry, property_name, obj != NULL);
+ 	if (!obj) {
+ 		return kIOReturnNotFound;
+ 	}
+@@ -3873,6 +3895,7 @@ is_io_registry_entry_get_property_bin_buf(
+ 	}
+ 
+ 	err = kIOReturnNotFound;
++	IORegistryEntry * asked = entry;
+ 	if (gIORegistryEntryPropertyKeysKey == sym) {
+ 		obj = entry->copyPropertyKeys();
+ 	} else {
+@@ -3905,6 +3928,7 @@ is_io_registry_entry_get_property_bin_buf(
+ 	}
+ 
+ 	sym->release();
++	regtrace_report(asked, property_name, obj != NULL);
+ 	if (!obj) {
+ 		return err;
+ 	}

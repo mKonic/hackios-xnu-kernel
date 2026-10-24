@@ -1,0 +1,28 @@
+diff --git a/osfmk/arm/pmap/pmap.h b/osfmk/arm/pmap/pmap.h
+index df672c65b144..d7e1da7c5db2 100644
+--- a/osfmk/arm/pmap/pmap.h
++++ b/osfmk/arm/pmap/pmap.h
+@@ -112,7 +112,13 @@
+  */
+ #define BOOTSTRAP_TABLE_SIZE (ARM_PGBYTES * 34)
+ #else /* defined(ARM_LARGE_MEMORY) */
+-#define BOOTSTRAP_TABLE_SIZE (ARM_PGBYTES * 8)
++/*
++ * With 4K pages every GB of DRAM costs one L2 page in each of the two
++ * bootstrap mappings (start.s maps all of memSize). Apple sized this for a
++ * 2 GB device (8 pages); 20 pages cover 8 GB, enough for a boot image of
++ * several GB next to the kernel.
++ */
++#define BOOTSTRAP_TABLE_SIZE (ARM_PGBYTES * 20)
+ #endif /* defined(ARM_LARGE_MEMORY) */
+ 
+ typedef uint64_t tt_entry_t; /* translation table entry type */
+@@ -442,7 +448,7 @@ struct pmap {
+ #if HAS_APPLE_PAC
+ 	bool disable_jop;
+ #else
+-	bool reserved10;
++	bool reserved12;
+ #endif /* HAS_APPLE_PAC */
+ 
+ 	bool reserved11;

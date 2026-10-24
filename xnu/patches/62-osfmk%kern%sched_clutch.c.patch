@@ -1,0 +1,13 @@
+diff --git a/osfmk/kern/sched_clutch.c b/osfmk/kern/sched_clutch.c
+index 3657d83c5b6f..ded2ff427d68 100644
+--- a/osfmk/kern/sched_clutch.c
++++ b/osfmk/kern/sched_clutch.c
+@@ -3204,7 +3204,7 @@ extern int sched_allow_rt_smt;
+ static bool
+ sched_clutch_thread_avoid_processor(processor_t processor, thread_t thread)
+ {
+-	if (processor->processor_primary != processor) {
++	if (processor->processor_primary != processor && !sched_slow_secondaries) {
+ 		/*
+ 		 * This is a secondary SMT processor.  If the primary is running
+ 		 * a realtime thread, only allow realtime threads on the secondary.

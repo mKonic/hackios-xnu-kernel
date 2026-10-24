@@ -158,6 +158,7 @@ index bb8ad1b..5b21eac 100644
  void redwood_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y);
 +/* The same for a sample taken at mach_absolute_time() `when` (0 = now), e.g. the host's own time of a touch. */
 +void redwood_touch_post_at(uint32_t type, uint32_t finger, uint32_t x, uint32_t y, uint64_t when);
- void redwood_input_init(void);
- void redwood_virtio_input_init(void);   /* boot-arg virtio_input=1: QEMU's virtio pointer and keyboard */
+ 
+ /* Block legacy register access unless the loader describes redwood or QEMU. */
+ bool redwood_platform_blocks_legacy_drivers(void);
  void redwood_goodix_init(void);         /* boot-arg touchscreen=1: the phone's Goodix or FocalTech touch screen */

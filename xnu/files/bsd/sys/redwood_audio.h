@@ -53,12 +53,25 @@ void redwood_audio_init(void);
 void redwood_virtio_sound_init(void);   /* boot-arg virtio_sound=1: QEMU's virtio sound device */
 void redwood_speaker_init(void);        /* boot-arg speaker_probe=N: a look at the phone's speaker amplifiers */
 void redwood_haptic_init(void);         /* boot-arg haptic=N: the phone's vibration motor (bsd/dev/redwood_haptic.c) */
+void annibale_haptic_init(void);        /* boot-arg hv_haptic=N: annibale's vibration motor, the PMIC's haptics block (bsd/dev/annibale_haptic.c) */
+void annibale_haptic_quiesce(void);     /* its driver module disabled: at the run's end and on a panic's way out */
 void redwood_haptic_quiesce(void);      /* its chip back into reset: at the run's end and on a panic's way out */
 void redwood_haptic_pretend(uint32_t peak); /* a test's stand-in for iOS's waveform: as if a write of this loudness came */
 void redwood_torch_init(void);          /* boot-arg torch=N: the phone's flashlight (bsd/dev/redwood_torch.c) */
 void redwood_torch_quiesce(void);       /* the light off: at the run's end and on a panic's way out */
 void redwood_camera_init(void);         /* boot-arg cam=N: the phone's cameras (bsd/dev/redwood_camera.c) */
 void redwood_camera_quiesce(void);      /* whatever of them was switched on, off: at the run's end and on a panic's way out */
+void annibale_buttons_init(void);       /* boot-arg buttons=1: annibale's keys, the PMIC's (bsd/dev/annibale_buttons.c) */
+void annibale_battery_init(void);       /* boot-arg battery=1: annibale's BQ27Z561 battery gauge (bsd/dev/annibale_battery.c) */
+void annibale_torch_init(void);         /* boot-arg torch_secs=N: annibale's flashlight, the PMIC's flash module (bsd/dev/annibale_torch.c) */
+void annibale_torch_quiesce(void);      /* its light off: at the run's end and on a panic's way out */
+bool annibale_torch_low_on(uint32_t milliamps);   /* the camera's (task L1b): the torch lit, up to the device tree's maximum */
+void annibale_torch_low_off(void);      /* ... and put out */
+void adreno8_init(void);                /* boot-arg adreno8=N (1..16): annibale's Adreno 830, step by step (bsd/dev/adreno8.c) */
+void adreno8_quiesce(void);             /* its GMU's processor back in reset: at the run's end and on a panic's way out */
+void mhi_pcie_init(void);               /* boot-arg pcie=N (1..3): the Wi-Fi card on PCIe root complex 0, survey (bsd/dev/mhi_pcie.c) */
+void annibale_spmi_lock(void);          /* the annibale drivers' one transfer at a time through the v7 arbiter (annibale_buttons.c) */
+void annibale_spmi_unlock(void);
 
 /*
  * The phone's speakers (bsd/dev/redwood_speaker.c): its two Awinic amplifiers, set up as

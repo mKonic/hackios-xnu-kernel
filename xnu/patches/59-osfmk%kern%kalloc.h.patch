@@ -1,0 +1,21 @@
+diff --git a/osfmk/kern/kalloc.h b/osfmk/kern/kalloc.h
+index dfa89c7b0d29..07e0ba5bf44c 100644
+--- a/osfmk/kern/kalloc.h
++++ b/osfmk/kern/kalloc.h
+@@ -821,12 +821,16 @@ __options_decl(kt_granule_t, uint32_t, {
+  * @param ptr           the pointer whose type needs to be checked.
+  * @param type          the type which the pointer will be checked against.
+  */
++#if XNU_NO_TYPE_BUILTINS
++#define KALLOC_TYPE_IS_COMPATIBLE_PTR(ptr, type)  (1)
++#else
+ #define KALLOC_TYPE_IS_COMPATIBLE_PTR(ptr, type)                   \
+ 	_Pragma("clang diagnostic push")                               \
+ 	_Pragma("clang diagnostic ignored \"-Wvoid-ptr-dereference\"") \
+ 	(__builtin_xnu_types_compatible(__typeof__(*(ptr)), type) ||   \
+ 	    __builtin_xnu_types_compatible(__typeof__(*(ptr)), void))  \
+ 	_Pragma("clang diagnostic pop")
++#endif /* XNU_NO_TYPE_BUILTINS */
+ 
+ #define KALLOC_TYPE_ASSERT_COMPATIBLE_POINTER(ptr, type) \
+ 	_Static_assert(KALLOC_TYPE_IS_COMPATIBLE_PTR(ptr, type), \

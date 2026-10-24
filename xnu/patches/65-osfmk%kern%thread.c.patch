@@ -1,0 +1,31 @@
+diff --git a/osfmk/kern/thread.c b/osfmk/kern/thread.c
+index 384ef23fe0e1..d5ab6db0edbc 100644
+--- a/osfmk/kern/thread.c
++++ b/osfmk/kern/thread.c
+@@ -3065,6 +3065,26 @@ thread_get_tag(thread_t th)
+ 	return thread_get_tag_internal(th);
+ }
+ 
++/*
++ * For apfs's lock statistics (bsd/miscfs/apfs/apfs_vnops.c): how long the current thread has
++ * been runnable (running included) and how long it has run, in mach_absolute_time() units.
++ * Taken before and after a wait for a lock, the two tell the wait apart: blocked, queued for
++ * a processor, or spinning on one.
++ */
++void thread_runnable_and_run_self(uint64_t *runnable, uint64_t *run);
++
++void
++thread_runnable_and_run_self(uint64_t *runnable, uint64_t *run)
++{
++	thread_t thread = current_thread();
++	boolean_t istate = ml_set_interrupts_enabled(FALSE);
++	uint64_t now = mach_absolute_time();
++
++	*runnable = thread->runnable_timer.all_bits + (now - thread->runnable_timer.tstamp);
++	*run = recount_current_thread_time_mach();
++	ml_set_interrupts_enabled(istate);
++}
++
+ uint64_t
+ thread_last_run_time(thread_t th)
+ {

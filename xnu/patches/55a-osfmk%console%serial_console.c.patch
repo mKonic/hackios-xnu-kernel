@@ -1,0 +1,47 @@
+diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
+index e5b23f2a2fbf..cfc80b4b4ad2 100644
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -509,10 +509,16 @@ console_resume()
+  * @param str The string of characters to print.
+  * @param size The number of characters in `str` to print.
+  */
++/* Capture both buffered and panic output before console routing can suppress it. */
++extern void loader_log_putc(char c);
++
+ void
+ console_write(char *str, int size)
+ {
+ 	assert(str != NULL);
++	for (int n = 0; n < size; n++) {
++		loader_log_putc(str[n]);
++	}
+ 
+ 	char *write_ptr = NULL;
+ 	int chunk_size = CPU_CONS_BUF_SIZE;
+@@ -575,21 +581,13 @@ console_write(char *str, int size)
+ 	}
+ }
+ 
+-/**
+- * Output a character directly to the underlying console (either video or serial).
+- * This directly bypasses the console serial buffer (as provided by console_write())
+- * and all of the synchronization that provides.
+- *
+- * @note This function can cause serial data to get printed interleaved if being
+- *       called on multiple CPUs at the same time. Only use this function if
+- *       there's a specific reason why this serial data can't get synchronized
+- *       through the console buffer.
+- *
+- * @param c The character to print.
+- */
++/* Output c directly to the video or serial console, bypassing console_write() buffering
++ * and synchronization. Concurrent CPUs can interleave characters; use only where buffered
++ * console synchronization is unsuitable. */
+ void
+ console_write_unbuffered(char c)
+ {
++	loader_log_putc(c);
+ 	_cnputc(c, true);
+ }
+ 

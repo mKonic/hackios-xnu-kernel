@@ -1,0 +1,99 @@
+diff --git a/osfmk/kern/sched_prim.c b/osfmk/kern/sched_prim.c
+index 8e29586464de..0a7de6fc4be7 100644
+--- a/osfmk/kern/sched_prim.c
++++ b/osfmk/kern/sched_prim.c
+@@ -2042,6 +2042,7 @@ sched_vm_group_maintenance(void)
+ #endif
+ 
+ int sched_allow_rt_smt = 1;
++bool sched_slow_secondaries = false;
+ int sched_avoid_cpu0 = SCHED_AVOID_CPU0;
+ int sched_allow_rt_steal = 1;
+ int sched_backup_cpu_timeout_count = 5; /* The maximum number of 10us delays to wait before using a backup cpu */
+@@ -2097,6 +2098,7 @@ void
+ sched_SMT_balance(processor_t cprocessor, processor_set_t cpset)
+ {
+ 	processor_t ast_processor = NULL;
++	sched_ipi_type_t ipi_type = SCHED_IPI_NONE;
+ 
+ #if (DEVELOPMENT || DEBUG)
+ 	if (__improbable(sched_smt_balance == 0)) {
+@@ -2105,7 +2107,39 @@ sched_SMT_balance(processor_t cprocessor, processor_set_t cpset)
+ #endif
+ 
+ 	assert(cprocessor == current_processor());
+-	if (cprocessor->is_SMT == FALSE) {
++	if (cprocessor->is_SMT == FALSE && !sched_slow_secondaries) {
++		goto smt_balance_exit;
++	}
++
++	if (sched_slow_secondaries) {
++		/*
++		 * A faster core is going idle: the thread of highest priority that runs on a slower one
++		 * (not a real-time one: those stay where they are) is sent here. Its core is made to
++		 * reschedule; a thread on a secondary goes back to the run queue then, and an idle
++		 * primary is where it is put.
++		 */
++		integer_t highest = -1;
++
++		if (cprocessor->processor_primary != cprocessor) {
++			goto smt_balance_exit;
++		}
++		uint64_t running_secondaries = (cpset->cpu_state_map[PROCESSOR_RUNNING] & ~cpset->primary_map &
++		    ~cpset->pending_AST_URGENT_cpu_mask);
++		for (int cpuid = lsb_first(running_secondaries); cpuid >= 0; cpuid = lsb_next(running_secondaries, cpuid)) {
++			processor_t sprocessor = processor_array[cpuid];
++
++			if (sprocessor->current_pri < BASEPRI_RTQUEUES && sprocessor->current_pri > highest &&
++			    sprocessor->current_pri > MINPRI) {
++				highest = sprocessor->current_pri;
++				ast_processor = sprocessor;
++			}
++		}
++		if (ast_processor != PROCESSOR_NULL) {
++			ipi_type = sched_ipi_action(ast_processor, NULL, SCHED_IPI_EVENT_SMT_REBAL);
++			if (ipi_type == SCHED_IPI_NONE) {
++				ast_processor = PROCESSOR_NULL;
++			}
++		}
+ 		goto smt_balance_exit;
+ 	}
+ 
+@@ -2120,7 +2154,6 @@ sched_SMT_balance(processor_t cprocessor, processor_set_t cpset)
+ 
+ 	processor_t sprocessor;
+ 
+-	sched_ipi_type_t ipi_type = SCHED_IPI_NONE;
+ 	uint64_t running_secondary_map = (cpset->cpu_state_map[PROCESSOR_RUNNING] &
+ 	    ~cpset->primary_map);
+ 	for (int cpuid = lsb_first(running_secondary_map); cpuid >= 0; cpuid = lsb_next(running_secondary_map, cpuid)) {
+@@ -2581,6 +2614,10 @@ restart:
+ 		bool is_yielding         = (*reason & AST_YIELD) == AST_YIELD;
+ 
+ 		bool needs_smt_rebalance = !is_yielding && thread->sched_pri < BASEPRI_RTQUEUES && processor->processor_primary != processor;
++		if (needs_smt_rebalance && sched_slow_secondaries) {
++			/* (a slower core of its own: worth leaving only for a faster one that is idle) */
++			needs_smt_rebalance = (pset->recommended_bitmask & pset->primary_map & pset->cpu_state_map[PROCESSOR_IDLE]) != 0;
++		}
+ 
+ 		bool affinity_mismatch   = thread->affinity_set != AFFINITY_SET_NULL && thread->affinity_set->aset_pset != pset;
+ 
+@@ -2705,7 +2742,7 @@ pick_new_rt_thread:
+ 
+ 				clear_pending_AST_bits(pset, processor, 3);
+ 
+-				if (processor->processor_secondary != NULL) {
++				if (processor->processor_secondary != NULL && !sched_slow_secondaries) {
+ 					processor_t sprocessor = processor->processor_secondary;
+ 					if ((sprocessor->state == PROCESSOR_RUNNING) || (sprocessor->state == PROCESSOR_DISPATCHING)) {
+ 						ipi_type = sched_ipi_action(sprocessor, NULL, SCHED_IPI_EVENT_SMT_REBAL);
+@@ -2774,7 +2811,8 @@ send_followup_ipi_before_idle:
+ 				goto restart;
+ 			}
+ 
+-			if ((processor->processor_primary != processor) && (processor->processor_primary->current_pri >= BASEPRI_RTQUEUES)) {
++			if ((processor->processor_primary != processor) && (processor->processor_primary->current_pri >= BASEPRI_RTQUEUES) &&
++			    !sched_slow_secondaries) {
+ 				/* secondary can only run realtime thread */
+ 				if (idle_reason == 0) {
+ 					idle_reason = 4;

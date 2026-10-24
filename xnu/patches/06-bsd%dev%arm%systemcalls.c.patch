@@ -1,0 +1,108 @@
+diff --git a/bsd/dev/arm/systemcalls.c b/bsd/dev/arm/systemcalls.c
+index 7fd9be1a5f38..0d035255b030 100644
+--- a/bsd/dev/arm/systemcalls.c
++++ b/bsd/dev/arm/systemcalls.c
+@@ -36,6 +36,92 @@
+ #include <security/mac_framework.h>
+ #endif
+ 
++/*
++ * Bring-up aid: boot-arg systrace=1 logs every BSD system call that fails,
++ * systrace=2 logs all of them (to the kernel message buffer). For calls that
++ * take a path, the path is shown. systrace_name=NAME keeps it to the processes
++ * of that name: with a whole system running, everybody's failed calls are
++ * megabytes a minute.
++ */
++static TUNABLE(uint32_t, systrace_level, "systrace", 0);
++static TUNABLE_STR(systrace_name, MAXCOMLEN + 1, "systrace_name", "");
++extern const char *syscallnames[];
++
++static void
++systrace_report(struct proc *proc, unsigned short syscode, struct uthread *uthread, int error)
++{
++	/* system calls whose first (or, for the second list, second) argument is a path */
++	static const unsigned short path_arg0[] = {
++		SYS_open, SYS_link, SYS_unlink, SYS_chdir, SYS_mknod, SYS_chmod, SYS_chown, SYS_access, SYS_readlink,
++		SYS_execve, SYS_chroot, SYS_rename, SYS_mkdir, SYS_rmdir, SYS_pathconf, SYS_getattrlist, SYS_setattrlist,
++		SYS_getxattr, SYS_listxattr, SYS_fsctl, SYS_stat64, SYS_lstat64, SYS_statfs64, SYS_open_nocancel,
++		SYS_open_dprotected_np, SYS_symlink, SYS_unmount, SYS_stat64_extended, SYS_lstat64_extended,
++	};
++	static const unsigned short path_arg1[] = {
++		SYS_mount, SYS_posix_spawn, SYS_openat, SYS_openat_nocancel, SYS_fstatat64, SYS_faccessat, SYS_readlinkat,
++		SYS_getattrlistat, SYS_mkdirat, SYS_unlinkat,
++	};
++	char path[160] = "";
++	/*
++	 * Two calls are worth more than their arguments' addresses, because what they ASK is the whole
++	 * of what they do. __mac_syscall carries the policy's name and the request number: this
++	 * kernel's AMFI stand-in answers only 0x5a and 0x60 and returns ENOPOLICY to anything else
++	 * (bsd/kern/kern_minimac.c), so a daemon refused there is refused in a way nothing in user
++	 * space can see -- and a library of ours cannot watch it either, since the call is made inside
++	 * libsystem and dyld interposing only stands between images. The name matters as much as the
++	 * number: the same call goes to Sandbox as well. And sysctl carries its MIB, which is the only
++	 * thing that says what was asked about.
++	 */
++	char detail[112] = "";
++	size_t done;
++
++	if (systrace_level < 2 && (error == 0 || error == EJUSTRETURN || error == ERESTART)) {
++		return;
++	}
++	if (systrace_name[0] != 0 && strncmp(proc->p_comm, systrace_name, MAXCOMLEN) != 0) {
++		return;
++	}
++	for (unsigned i = 0; i < sizeof(path_arg0) / sizeof(path_arg0[0]); i++) {
++		if (path_arg0[i] == syscode) {
++			(void)copyinstr((user_addr_t)uthread->uu_arg[0], path, sizeof(path), &done);
++		}
++	}
++	for (unsigned i = 0; i < sizeof(path_arg1) / sizeof(path_arg1[0]); i++) {
++		if (path_arg1[i] == syscode) {
++			(void)copyinstr((user_addr_t)uthread->uu_arg[1], path, sizeof(path), &done);
++		}
++	}
++	path[sizeof(path) - 1] = 0;
++	if (syscode == SYS___mac_syscall) {
++		char policy[32] = "";
++
++		(void)copyinstr((user_addr_t)uthread->uu_arg[0], policy, sizeof(policy), &done);
++		policy[sizeof(policy) - 1] = 0;
++		snprintf(detail, sizeof(detail), " policy \"%s\" request %lld", policy,
++		    (long long)uthread->uu_arg[1]);
++	} else if (syscode == SYS_sysctl) {
++		int mib[6];
++		unsigned count = (unsigned)uthread->uu_arg[1];
++
++		if (count > 6) {
++			count = 6;
++		}
++		if (count > 0 && copyin((user_addr_t)uthread->uu_arg[0], mib, count * sizeof(mib[0])) == 0) {
++			size_t used = (size_t)snprintf(detail, sizeof(detail), " mib");
++
++			for (unsigned i = 0; i < count && used + 12 < sizeof(detail); i++) {
++				used += (size_t)snprintf(detail + used, sizeof(detail) - used, " %d", mib[i]);
++			}
++		}
++	}
++	detail[sizeof(detail) - 1] = 0;
++	printf("systrace: %s[%d] %s(0x%llx, 0x%llx, 0x%llx, 0x%llx)%s%s%s%s = %d\n",
++	    proc->p_comm, proc_getpid(proc), syscallnames[syscode],
++	    (unsigned long long)uthread->uu_arg[0], (unsigned long long)uthread->uu_arg[1],
++	    (unsigned long long)uthread->uu_arg[2], (unsigned long long)uthread->uu_arg[3],
++	    path[0] ? " \"" : "", path, path[0] ? "\"" : "", detail, error);
++}
++
+ #if CONFIG_DTRACE
+ extern int32_t dtrace_systrace_syscall(struct proc *, void *, int *);
+ extern void dtrace_systrace_syscall_return(unsigned short, int, int *);
+@@ -181,6 +267,10 @@ unix_syscall(
+ 	error = (*(callp->sy_call))(proc, &uthread->uu_arg[0], &(uthread->uu_rval[0]));
+ 	AUDIT_SYSCALL_EXIT(code, proc, uthread, error);
+ 
++	if (__improbable(systrace_level != 0)) {
++		systrace_report(proc, syscode, uthread, error);
++	}
++
+ #if CONFIG_MACF
+ skip_syscall:
+ #endif /* CONFIG_MACF */

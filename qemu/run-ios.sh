@@ -61,8 +61,14 @@ dst = os.open(sys.argv[2], os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
 offset, size = int(sys.argv[3]), int(sys.argv[4])
 os.ftruncate(dst, size)
 total, done = os.fstat(src).st_size, 0
-while done < total:
-    done += os.copy_file_range(src, dst, total - done, done, offset + done)
+cfr = getattr(os, "copy_file_range", None)        # Linux only; macOS falls to the read/write loop
+if cfr:
+    while done < total:
+        done += cfr(src, dst, total - done, done, offset + done)
+else:
+    os.lseek(src, 0, os.SEEK_SET); os.lseek(dst, offset, os.SEEK_SET)
+    while done < total:
+        done += os.write(dst, os.read(src, 1 << 22))
 PY
 fi
 NET=()

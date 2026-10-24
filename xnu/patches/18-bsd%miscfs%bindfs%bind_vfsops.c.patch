@@ -1,0 +1,19 @@
+diff --git a/bsd/miscfs/bindfs/bind_vfsops.c b/bsd/miscfs/bindfs/bind_vfsops.c
+index 412f9ecfc22c..f6595c0401a3 100644
+--- a/bsd/miscfs/bindfs/bind_vfsops.c
++++ b/bsd/miscfs/bindfs/bind_vfsops.c
+@@ -139,8 +139,12 @@ bindfs_mount(struct mount * mp, __unused vnode_t devvp, user_addr_t user_data, v
+ 		return ENOTSUP;
+ 	}
+ 
+-	/* check entitlement */
+-	if (!IOCurrentTaskHasEntitlement(BINDFS_ENTITLEMENT)) {
++	/*
++	 * check entitlement -- redwood: or process 1, the port's own init, unsigned, which binds
++	 * its choice of launchd jobs and the like onto the read-only iOS root volume before it
++	 * hands over to launchd (userland/src/init.c, root_apfs=)
++	 */
++	if (!IOCurrentTaskHasEntitlement(BINDFS_ENTITLEMENT) && proc_getpid(current_proc()) != 1) {
+ 		return EPERM;
+ 	}
+ 

@@ -1,0 +1,32 @@
+diff --git a/osfmk/kern/percpu.h b/osfmk/kern/percpu.h
+index 4fb223ee9788..df563bc04910 100644
+--- a/osfmk/kern/percpu.h
++++ b/osfmk/kern/percpu.h
+@@ -236,15 +236,22 @@ extern vm_offset_t other_percpu_base(int cpu_number);
+  * @param it            the name of the iterator
+  * @param name          the per-CPU variable name
+  */
++/*
++ * (redwood) All of the arithmetic is on integers here. As Apple wrote it, the end was a pointer
++ * computed from the start, and a compiler may then take "start <= start + n" for "n >= 0":
++ * with one processor start is VM_MAX_KERNEL_ADDRESS and end is 0, n looks positive, and the
++ * loop that must not run at all runs once on memory that does not exist (clang 18+ does this;
++ * the panic was in mbuf_mtypes_sync(), the first time a daemon asked for the mbuf statistics).
++ */
+ #define percpu_foreach_secondary(it, name) \
+ 	for (__PERCPU_TYPE(name) it, \
+-	    __base_ ## it = (typeof(it))__unsafe_forge_bidi_indexable(void *, percpu_base.start, percpu_base.end - percpu_base.start), \
+-	    __end_ ## it = (typeof(it))((caddr_t)__base_ ## it  + percpu_base.end - percpu_base.start); \
++	    __base_ ## it = (typeof(it))percpu_base.start, \
++	    __end_ ## it = (typeof(it))percpu_base.end; \
+         \
+-	    (it = (typeof(it))((caddr_t)__base_ ## it + __PERCPU_ADDR(name)), \
+-	    __base_ ## it <= __end_ ## it); \
++	    (it = (typeof(it))((vm_address_t)__base_ ## it + __PERCPU_ADDR(name)), \
++	    (vm_address_t)__base_ ## it <= (vm_address_t)__end_ ## it); \
+         \
+-	    __base_ ## it = (typeof(it))((caddr_t)__base_ ## it + percpu_section_size()))
++	    __base_ ## it = (typeof(it))((vm_address_t)__base_ ## it + percpu_section_size()))
+ 
+ #pragma mark - implementation details
+ 

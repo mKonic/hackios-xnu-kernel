@@ -1,0 +1,216 @@
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+index e76e7e70ab9c..71e577132b6c 100644
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -734,6 +734,9 @@ ml_get_machine_mem(void)
+ 	return machine_info.memory_size;
+ }
+ 
++extern void loader_return(void);
++extern void redwood_adreno_stop(void);
++
+ __attribute__((noreturn))
+ void
+ halt_all_cpus(boolean_t reboot)
+@@ -745,6 +748,9 @@ halt_all_cpus(boolean_t reboot)
+ 		printf("CPU halted\n");
+ 		PEHaltRestart(kPEHaltCPU);
+ 	}
++	/* No platform driver powers the machine off: hand control (and the log) back to the loader. */
++	redwood_adreno_stop();
++	loader_return();
+ 	while (1) {
+ 		;
+ 	}
+@@ -932,6 +938,99 @@ ml_read_chip_revision(unsigned int *rev __unused)
+ #endif
+ }
+ 
++/*
++ * The slower cores (an L2 access penalty, or the loader's "small-core"): each is made the SMT
++ * sibling ("secondary") of a faster core of its own, and the scheduler then treats it as XNU
++ * treats the second thread of a hyperthreaded core: a thread is put on it only when no faster
++ * core is idle or running something of lower priority; it looks for work only when none of
++ * them is idle; and what runs on it goes back to the run queue at every rescheduling, to be
++ * put on a faster core that has come free meanwhile. (XNU itself pairs such a core with the
++ * boot processor, which allows one of them; the phone has three: with cpus=8, cores 3, 2 and
++ * 1 go with 4, 5 and 6, so that 7, the boot core and the fastest, where real-time threads go
++ * first, stays alone: the scheduler idles a secondary while its primary runs a real-time
++ * thread.)
++ */
++static uint32_t small_cores_apart = 2;          /* boot-arg small_cores, read in ml_parse_cpu_topology() (before tunables are) */
++static int ml_slow_core_partner[MAX_CPUS];      /* by cpu_id: the faster core it is paired with, -1 if none */
++
++static void
++ml_choose_slow_core_partners(void)
++{
++	bool taken[MAX_CPUS] = { false };
++
++	for (int i = 0; i < MAX_CPUS; i++) {
++		ml_slow_core_partner[i] = -1;
++	}
++	for (int i = 0; i < (int)topology_info.num_cpus; i++) {
++		int partner = -1;
++
++		if (topology_info.cpus[i].l2_access_penalty == 0) {
++			continue;
++		}
++		/* the last fast core not yet taken; the boot core only if there is no other */
++		for (int j = (int)topology_info.num_cpus - 1; j >= 0; j--) {
++			if (topology_info.cpus[j].l2_access_penalty != 0 || taken[j]) {
++				continue;
++			}
++			if (&topology_info.cpus[j] == topology_info.boot_cpu) {
++				if (partner < 0) {
++					partner = j;
++				}
++				continue;
++			}
++			partner = j;
++			break;
++		}
++		if (partner >= 0) {
++			taken[partner] = true;
++			ml_slow_core_partner[i] = partner;
++		}
++	}
++}
++
++extern void loader_log_line(const char *line);
++
++/* At the registration of each processor: pairs it with its partner, if that one is registered too. */
++static void
++ml_pair_slow_processors(int cpu_id)
++{
++	for (int i = 0; i < (int)topology_info.num_cpus; i++) {
++		int partner = ml_slow_core_partner[i];
++		processor_t slow, fast;
++		char line[128];
++
++		if (partner < 0 || (i != cpu_id && partner != cpu_id)) {
++			continue;
++		}
++		slow = processor_array[i];
++		fast = processor_array[partner];
++		if (slow == PROCESSOR_NULL || fast == PROCESSOR_NULL || slow->processor_primary == fast) {
++			continue;
++		}
++		sched_slow_secondaries = small_cores_apart >= 2;
++		processor_set_primary(slow, fast);
++		snprintf(line, sizeof(line), "cpu %d (phys id 0x%x) is a slower core: the scheduler uses it after cpu %d (phys id 0x%x)\n",
++		    i, topology_info.cpus[i].phys_id, partner, topology_info.cpus[partner].phys_id);
++		printf("%s", line);
++		loader_log_line(line);          /* (the kernel's own log of a run keeps only its end) */
++	}
++}
++
++/* How long processor cpu_id has been idle since it started, in mach_absolute_time() units (redwood_cpufreq.c's cpuload). */
++bool ml_cpu_idle_time(int cpu_id, uint64_t *idle);
++
++bool
++ml_cpu_idle_time(int cpu_id, uint64_t *idle)
++{
++	struct recount_usage usage = { 0 };
++
++	if (cpu_id < 0 || cpu_id >= MAX_SCHED_CPUS || processor_array[cpu_id] == PROCESSOR_NULL) {
++		return false;
++	}
++	recount_processor_usage(&processor_array[cpu_id]->pr_recount, &usage, idle);
++	return true;
++}
++
+ void
+ ml_parse_cpu_topology(void)
+ {
+@@ -945,6 +1044,7 @@ ml_parse_cpu_topology(void)
+ 	int64_t cluster_max_cpu_phys_id[MAX_CPU_CLUSTER_PHY_ID + 1];
+ 	const boolean_t cpus_boot_arg_present = PE_parse_boot_argn("cpus", &cpu_boot_arg, sizeof(cpu_boot_arg));
+ 	const boolean_t cpumask_boot_arg_present = PE_parse_boot_argn("cpumask", &cpumask_boot_arg, sizeof(cpumask_boot_arg));
++	PE_parse_boot_argn("small_cores", &small_cores_apart, sizeof(small_cores_apart));
+ 
+ 	// The cpus=N and cpumask=N boot args cannot be used simultaneously. Flag this
+ 	// so that we trigger a panic later in the boot process, once serial is enabled.
+@@ -1005,6 +1105,20 @@ ml_parse_cpu_topology(void)
+ 		cpu->phys_id = (uint32_t)ml_readprop(child, "reg", ML_READPROP_MANDATORY);
+ 
+ 		cpu->l2_access_penalty = (uint32_t)ml_readprop(child, "l2-access-penalty", 0);
++		/*
++		 * A core the boot loader calls small (on the phone the Cortex-A55s; the Cortex-A78 the
++		 * kernel boots on is about 2.5 times as fast) is to be used only when the faster ones are all
++		 * busy: what XNU does with a core that has an L2 access penalty (ml_pair_slow_processors()).
++		 * The loader gives it a name of its own because a kernel without that function would make
++		 * every such core the sibling of the boot processor, and stop at the assertion that a
++		 * processor has only one. Boot-arg small_cores=0: all cores alike, as before; 1: paired as
++		 * XNU pairs the two threads of a hyperthreaded core (a secondary kept idle while its primary
++		 * runs a real-time thread, and so on); 2 (the default): as cores of their own (see
++		 * sched_slow_secondaries in osfmk/kern/sched.h).
++		 */
++		if (cpu->l2_access_penalty == 0 && ml_readprop(child, "small-core", 0) != 0 && small_cores_apart) {
++			cpu->l2_access_penalty = 1;
++		}
+ 		cpu->l2_cache_size = (uint32_t)ml_readprop(child, "l2-cache-size", 0);
+ 		cpu->l2_cache_id = (uint32_t)ml_readprop(child, "l2-cache-id", 0);
+ 		cpu->l3_cache_size = (uint32_t)ml_readprop(child, "l3-cache-size", 0);
+@@ -1107,6 +1221,7 @@ ml_parse_cpu_topology(void)
+ 	cluster_offsets[0] = 0;
+ #endif
+ 	assert(topology_info.boot_cpu != NULL);
++	ml_choose_slow_core_partners();
+ 	ml_read_chip_revision(&topology_info.chip_revision);
+ 
+ 	/*
+@@ -1183,7 +1298,11 @@ ml_get_boot_cluster_type(void)
+ int
+ ml_get_cpu_number(uint32_t phys_id)
+ {
++	#if defined(GENERIC_PSCI_SMP)
++	phys_id &= MPIDR_AFF2_MASK | MPIDR_AFF1_MASK | MPIDR_AFF0_MASK;
++#else
+ 	phys_id &= MPIDR_AFF1_MASK | MPIDR_AFF0_MASK;
++#endif
+ 
+ 	for (unsigned i = 0; i < topology_info.num_cpus; i++) {
+ 		if (topology_info.cpus[i].phys_id == phys_id) {
+@@ -1427,17 +1546,15 @@ ml_processor_register(ml_processor_info_t *in_processor_info,
+ 	processor_t processor = PERCPU_GET_RELATIVE(processor, cpu_data, this_cpu_datap);
+ 	if (!is_boot_cpu) {
+ 		processor_init(processor, this_cpu_datap->cpu_number, pset);
+-
+-		if (this_cpu_datap->cpu_l2_access_penalty) {
+-			/*
+-			 * Cores that have a non-zero L2 access penalty compared
+-			 * to the boot processor should be de-prioritized by the
+-			 * scheduler, so that threads use the cores with better L2
+-			 * preferentially.
+-			 */
+-			processor_set_primary(processor, master_processor);
+-		}
+ 	}
++	/*
++	 * Cores that have a non-zero L2 access penalty compared
++	 * to the boot processor should be de-prioritized by the
++	 * scheduler, so that threads use the cores with better L2
++	 * preferentially. (Each with a faster core of its own, not all with the boot
++	 * processor: see ml_choose_slow_core_partners().)
++	 */
++	ml_pair_slow_processors(this_cpu_datap->cpu_number);
+ 
+ 	*processor_out = processor;
+ 	*ipi_handler_out = cpu_signal_handler;
+@@ -2237,8 +2354,16 @@ _enable_virtual_timer(void)
+ 	uint64_t cntvctl = CNTV_CTL_EL0_ENABLE; /* One wants to use 32 bits, but "mrs" prefers it this way */
+ 
+ 	__builtin_arm_wsr64("CNTV_CTL_EL0", cntvctl);
++#if defined(APPLE_ARM64_ARCH_FAMILY)
+ 	/* disable the physical timer as a precaution, as its registers reset to architecturally unknown values */
+ 	__builtin_arm_wsr64("CNTP_CTL_EL0", CNTP_CTL_EL0_IMASKED);
++#else
++	/*
++	 * When running at EL1 under a third-party hypervisor (e.g. Qualcomm's),
++	 * the EL1 physical timer registers are trapped and the access faults.
++	 * The guest only owns the virtual timer.
++	 */
++#endif
+ }
+ 
+ void

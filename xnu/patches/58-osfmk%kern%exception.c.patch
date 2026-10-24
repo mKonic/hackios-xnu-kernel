@@ -1,0 +1,28 @@
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+index 809dafaaa2a7..71c6580f44e2 100644
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -636,6 +636,11 @@ check_exc_receiver_dependency(
+  *	Returns:
+  *		KERN_SUCCESS if exception is handled by any of the handlers.
+  */
++#if defined(__arm64__)
++extern void user_exception_trace(exception_type_t exception, mach_exception_data_t code,
++    mach_msg_type_number_t count, thread_t thread);
++#endif
++
+ kern_return_t
+ exception_triage_thread(
+ 	exception_type_t        exception,
+@@ -650,6 +655,11 @@ exception_triage_thread(
+ 	struct exception_action *actions;
+ 	kern_return_t   kr = KERN_FAILURE;
+ 
++#if defined(__arm64__)
++	/* bring-up aid, see osfmk/arm64/user_exception_trace.c */
++	user_exception_trace(exception, code, codeCnt, thread);
++#endif
++
+ 	assert(exception != EXC_RPC_ALERT);
+ 
+ 	/*

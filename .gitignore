@@ -23,6 +23,7 @@
 !/avf/
 
 __pycache__/
+.DS_Store
 *~
 *.orig
 *.rej
@@ -36,6 +37,7 @@ __pycache__/
 /tools/mesa/
 /tools/metal/
 /tools/mk-mesa.sh
+/tools/mesa-stamp.sh
 /tools/mk-jb.sh
 /tools/jb-preinstall.py
 /tools/font_trim.py
@@ -47,6 +49,7 @@ __pycache__/
 !/xnuloader/efi.h
 !/xnuloader/identity.h
 !/xnuloader/loader.c
+!/xnuloader/platform_private.h
 !/xnuloader/mkidentity.py
 !/xnuloader/mkpayload.py
 
@@ -83,3 +86,7 @@ __pycache__/
 !/xnu-deps/build/lzbitmap/libzbitmap.c
 !/xnu-deps/build/lzbitmap/libzbitmap.h
 /tools/android/f2fs-resize
+
+# Local diagnostics remain outside source control.
+/docs/progress/evidence/
+/docs/analysis/local/

@@ -1,0 +1,19 @@
+diff --git a/iokit/conf/files b/iokit/conf/files
+index 5fb0a52062e0..6c430c2b23c7 100644
+--- a/iokit/conf/files
++++ b/iokit/conf/files
+@@ -79,6 +79,14 @@ iokit/Kernel/IOSubMemoryDescriptor.cpp			optional iokitcpp
+ iokit/Kernel/IOGuardPageMemoryDescriptor.cpp		optional iokitcpp
+ 
+ iokit/Kernel/IOPlatformExpert.cpp			optional iokitcpp
++iokit/Kernel/GenericARMPE.cpp			optional iokitcpp
++iokit/Kernel/MiniIOSurface.cpp			optional iokitcpp
++iokit/Kernel/MiniIOMobileFramebuffer.cpp		optional iokitcpp
++iokit/Kernel/RedwoodGPU.cpp				optional iokitcpp
++iokit/Kernel/RedwoodWLAN.cpp			optional iokitcpp
++iokit/Kernel/RedwoodBattery.cpp			optional iokitcpp
++iokit/Kernel/MiniAppleKeyStore.cpp			optional iokitcpp
++iokit/Kernel/MiniIONetworkStack.cpp			optional iokitcpp
+ iokit/Kernel/IOPlatformIO.cpp				optional iokitcpp
+ 
+ iokit/Kernel/IOCPU.cpp					optional iokitcpp

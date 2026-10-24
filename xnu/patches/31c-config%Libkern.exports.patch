@@ -1,0 +1,26 @@
+diff --git a/config/Libkern.exports b/config/Libkern.exports
+--- a/config/Libkern.exports
++++ b/config/Libkern.exports
+@@ -1,3 +1,6 @@
++# Generic ARM64 port: only implemented kernel interfaces are exported.
++# Omitted entries require unavailable generated DriverKit RPC or Apple
++# PPL/DART implementations. Keep symbol-set/export checks enabled.
+ _Assert
+ _MD5Final
+ _MD5Init
+@@ -390,7 +393,6 @@
+ __ZN8OSObject9MetaClass8DispatchE5IORPC
+ __ZN8OSObject9MetaClassC1Ev
+ __ZN8OSObject9MetaClassC2Ev
+-__ZN8OSObject9_DispatchEPS_5IORPC
+ __ZN8OSObject9metaClassE
+ __ZN8OSObjectC1EPK11OSMetaClass
+ __ZN8OSObjectC1Ev
+@@ -448,7 +450,6 @@
+ __ZN8OSSymbolnwEm
+ __ZN9IOService8DispatchE5IORPC
+ __ZN9IOService9MetaClass8DispatchE5IORPC
+-__ZN9IOService9_DispatchEPS_5IORPC
+ __ZN9OSBoolean10gMetaClassE
+ __ZN9OSBoolean10initializeEv
+ __ZN9OSBoolean10superClassE
