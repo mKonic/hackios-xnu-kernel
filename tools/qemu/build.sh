@@ -4,7 +4,9 @@
 #   hw/display/virtio-gpu-rutabaga: one surface per scanout, shared with the display (no "Display output is
 #         not active." flicker, no frames dropped by the D-Bus display; the skin maps the picture)
 #   accel/tcg: the next-block lookup without the state copy that stalled on store forwarding, probed in
-#         host code at the end of a block, from a jump cache of 64K entries kept across ASID switches
+#         host code at the end of a block, from a jump cache of 64K entries kept across ASID switches;
+#         a return-address stack, so that most RETs go to the block they returned to last without a lookup
+#   target/arm: native calls on the PSCI conduit (SHA-256, zlib inflate on guest memory; the kernel's patch 1600)
 #   system/main: exit without the libraries' destructors (gfxstream crashed in an unloading EGL at exit)
 #   contrib/plugins/sampler: a sampling profiler (out/qemu/lib/libsampler.so; qemu/run-ios.sh QEMU_PROFILE=FILE)
 #   contrib/plugins/excstat, tbstat, jcsim, rasim: exceptions and system calls by kind, translations, jump cache
