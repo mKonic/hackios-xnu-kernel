@@ -253,7 +253,10 @@ loader_jump(uint64_t reason, uint64_t code)
 	 * firmware switch this one off. It must go as the other cores do (psci_smp_cpu_off()), with
 	 * nothing pending: after a panic the "stop" signal and the timer are.
 	 */
-	if (PE_parse_boot_argn("bootcpu", &own_core, sizeof(own_core))) {
+	/* Checkpoint 10 precedes PE_init_platform(): PE_boot_args() would
+	 * dereference its still-null bootArgs. The same-core early return needs
+	 * no secondary-CPU shutdown; retain that handling once PE is ready. */
+	if (PE_state.bootArgs != NULL && PE_parse_boot_argn("bootcpu", &own_core, sizeof(own_core))) {
 		__builtin_arm_wsr64("CNTV_CTL_EL0", CNTV_CTL_EL0_IMASKED);
 		gic_v3_irq_cpu_shutdown();
 	}
