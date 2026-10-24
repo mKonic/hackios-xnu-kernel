@@ -710,6 +710,18 @@ dt_end(struct dt_writer *w)
 
 #include "platform_private.h"
 
+/*
+ * A phone build's screen when its UEFI has no GOP: the splash buffer LK left lit. The SM8750 phones
+ * share its address (platform_annibale.fb_base); the mode is the panel's: 1156x2510 on the K90,
+ * 1216x2688 on the NX789J (its profile's LOADER_CFLAGS).
+ */
+#ifndef PHONE_FB_WIDTH
+#define PHONE_FB_WIDTH 1156
+#endif
+#ifndef PHONE_FB_HEIGHT
+#define PHONE_FB_HEIGHT 2510
+#endif
+
 /* ------------------------------------------------------------------------ */
 /* PCI host bridge -> device tree node /pci0 (XNU: bsd/dev/redwood_pci.c)    */
 /*                                                                          */
@@ -4553,9 +4565,9 @@ efi_main(efi_handle image, efi_system_table *st)
 		 */
 		PLAT = &platform_annibale;
 		SCREEN.base = platform_annibale.fb_base;
-		SCREEN.width = 1156;              /* P11 mode from the device tree and Android DRM */
-		SCREEN.height = 2510;
-		SCREEN.stride = 1156 * 4;
+		SCREEN.width = PHONE_FB_WIDTH;    /* the panel mode LK lit (the K90: P11, 1156x2510) */
+		SCREEN.height = PHONE_FB_HEIGHT;
+		SCREEN.stride = PHONE_FB_WIDTH * 4;
 		print("display assumed at %x: LK splash region\n", SCREEN.base);
 #endif
 	} else {
