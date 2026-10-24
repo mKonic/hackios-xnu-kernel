@@ -7,7 +7,8 @@
 #         host code at the end of a block, from a jump cache of 64K entries kept across ASID switches
 #   system/main: exit without the libraries' destructors (gfxstream crashed in an unloading EGL at exit)
 #   contrib/plugins/sampler: a sampling profiler (out/qemu/lib/libsampler.so; qemu/run-ios.sh QEMU_PROFILE=FILE)
-#   contrib/plugins/excstat, tbstat, jcsim: exceptions and system calls by kind, translations, jump cache misses
+#   contrib/plugins/excstat, tbstat, jcsim, rasim: exceptions and system calls by kind, translations, jump cache
+#   misses, how often a return-address stack would predict returns
 #         (out/qemu/lib; pass one to QEMU with -plugin PATH,out=FILE)
 # Needs what the distribution's QEMU needs to build, with rutabaga-ffi (its gfxstream) and meson.
 set -e
@@ -28,5 +29,5 @@ cd "$D"
 	--disable-modules --enable-rutabaga-gfx --enable-dbus-display --enable-opengl --enable-gio --enable-slirp >/dev/null
 make -j"${JOBS:-8}" >/dev/null
 make install >/dev/null
-mkdir -p "$OUT/lib" && cp build/contrib/plugins/lib{sampler,excstat,tbstat,jcsim}.so "$OUT/lib/"
+mkdir -p "$OUT/lib" && cp build/contrib/plugins/lib{sampler,excstat,tbstat,jcsim,rasim}.so "$OUT/lib/"
 echo "build.sh: $OUT/bin/qemu-system-aarch64 ($("$OUT/bin/qemu-system-aarch64" --version | head -1), $(git rev-parse --short HEAD))"
