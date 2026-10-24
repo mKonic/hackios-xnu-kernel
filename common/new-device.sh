@@ -17,7 +17,7 @@ CONF=common/devices/$CODE.conf PLATC=common/devices/$CODE.platform.c
 
 sed -e "s/^NAME=.*/NAME=\"TODO vendor model ($CODE)\"/" -e "s/^UEFI_TARGET=.*/UEFI_TARGET=$CODE/" \
 	common/devices/_template.conf > "$CONF"
-[ -n "$DTB" ] && sed -i "s|^DTB=.*|DTB=$(readlink -f "$DTB")|" "$CONF"
+[ -n "$DTB" ] && { tmp=$(mktemp) && sed "s|^DTB=.*|DTB=$(readlink -f "$DTB")|" "$CONF" >"$tmp" && mv "$tmp" "$CONF"; }
 
 GIC_DIST=TODO GIC_REDIST=TODO CORES=8 SHIFT=8 SMALL=0x0
 if [ -n "$DTB" ]; then
