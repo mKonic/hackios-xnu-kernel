@@ -37,6 +37,9 @@
 #include <mach/vm_param.h>
 #include <vm/vm_kern.h>
 #include <vm/vm_map.h>
+#if __has_include(<vm/vm_map_xnu.h>)
+#include <vm/vm_map_xnu.h>                     /* xnu-12377: vm_map_copy_overwrite() */
+#endif
 #include <security/mac_framework.h>
 #include <security/mac_policy.h>
 
@@ -68,7 +71,8 @@ miniamfi_vnode_check_signature(__unused struct vnode *vp, __unused struct label 
  * our own library be loaded into stock daemons (DYLD_INSERT_LIBRARIES).
  */
 #define AMFI_SYSCALL_CHECK_DYLD_POLICY  0x5a
-#define AMFI_DYLD_OUTPUT_ALLOW_ALL      0xffULL
+/* Bit 8 permits development variables, including iOS 26's OS_ACTIVITY_DT_MODE. */
+#define AMFI_DYLD_OUTPUT_ALLOW_ALL      0x1ffULL
 
 /*
  * Request 0x60, "query boot-arg state" (amfi_interface_query_bootarg_state() in libamfi): the
@@ -86,6 +90,77 @@ miniamfi_vnode_check_signature(__unused struct vnode *vp, __unused struct label 
 #define AMFI_SYSCALL_QUERY_BOOTARG_STATE 0x60
 #define AMFI_BOOTARG_STATE_NOT_ENFORCING 0x86ULL
 
+/*
+ * iOS 26 libxpc uses request 0x66 for lightweight code requirements. A syscall
+ * error and a match result are separate: error_code 0 means MATCH, 5 means an
+ * invalid request. MiniAMFI accepts readable constraints without interpreting
+ * them, consistent with its existing non-enforcing policy.
+ */
+#define AMFI_SYSCALL_MATCH_CONSTRAINT 0x66
+#define AMFI_CONSTRAINT_INVALID 5
+
+struct miniamfi_constraint_args {
+	uint32_t audit_token[8];
+	user_addr_t constraint;
+	uint32_t constraint_size;
+	uint32_t padding0;
+	user_addr_t result;
+	uint32_t result_size;
+	uint32_t padding1;
+};
+
+struct miniamfi_constraint_result {
+	uint32_t error_code;
+	char diagnostic[0x400];
+};
+
+_Static_assert(sizeof(struct miniamfi_constraint_args) == 0x40, "AMFI request 0x66 ABI");
+_Static_assert(sizeof(struct miniamfi_constraint_result) == 0x404, "AMFI match result ABI");
+
+static int
+miniamfi_match_constraint(user_addr_t arg)
+{
+	struct miniamfi_constraint_args args;
+	struct miniamfi_constraint_result result = { .error_code = AMFI_CONSTRAINT_INVALID };
+	uint8_t scratch[256];
+	int error = copyin(arg, &args, sizeof(args));
+	if (error) {
+		return error;
+	}
+	if (!args.result) {
+		return EFAULT;
+	}
+	if (args.result_size < sizeof(result.error_code)) {
+		return EINVAL;
+	}
+	/* Preserve a non-MATCH result if validation or a later copy fails. */
+	error = copyout(&result.error_code, args.result, sizeof(result.error_code));
+	if (error || args.result_size != sizeof(result)) {
+		return error;
+	}
+	error = copyout(result.diagnostic, args.result + sizeof(result.error_code), sizeof(result.diagnostic));
+	if (error) {
+		return error;
+	}
+	if (!args.constraint || !args.constraint_size || args.constraint_size > 0x4000) {
+		return 0;
+	}
+	if (args.constraint > UINT64_MAX - args.constraint_size) {
+		return EFAULT;
+	}
+	for (uint32_t offset = 0; offset < args.constraint_size;) {
+		size_t count = MIN(sizeof(scratch), args.constraint_size - offset);
+		error = copyin(args.constraint + offset, scratch, count);
+		if (error) {
+			return error;
+		}
+		offset += (uint32_t)count;
+	}
+	/* The diagnostic bytes were cleared before reading the constraint. */
+	result.error_code = 0;
+	return copyout(&result.error_code, args.result, sizeof(result.error_code));
+}
+
 static int
 miniamfi_policy_syscall(__unused struct proc *p, int call, user_addr_t arg)
 {
@@ -97,6 +172,9 @@ miniamfi_policy_syscall(__unused struct proc *p, int call, user_addr_t arg)
 	uint64_t state = AMFI_BOOTARG_STATE_NOT_ENFORCING;
 	int error;
 
+	if (call == AMFI_SYSCALL_MATCH_CONSTRAINT) {
+		return miniamfi_match_constraint(arg);
+	}
 	if (call == AMFI_SYSCALL_QUERY_BOOTARG_STATE) {
 		return copyout(&state, arg, sizeof(state));
 	}
