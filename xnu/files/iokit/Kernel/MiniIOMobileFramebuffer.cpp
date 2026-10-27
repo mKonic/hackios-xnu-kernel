@@ -40,6 +40,7 @@ extern struct vc_info vinfo;            /* the boot framebuffer, as the text con
 
 #include "MiniIOSurface.h"
 #include "MiniFramebufferScale.h"
+#include "MiniFramebufferSwap.h"
 
 extern "C" void redwood_tl(const char * format, ...) __printflike(1, 2);
 
@@ -67,17 +68,6 @@ enum {
 	kFBMethodGetProtectionOptions   = 82,
 };
 
-/* The swap request (IOMobileFramebufferSwapEnd): 0x46c bytes, of which we read these. */
-#define SWAP_SIZE               0x46c
-#define SWAP_ID                 0x50
-#define SWAP_SURFACE(layer)     (0x54 + 4 * (layer))    /* surface number, 0 = none */
-#define SWAP_SOURCE(layer)      (0x64 + 16 * (layer))   /* x, y, width, height in the surface */
-#define SWAP_ENABLED(layer)     (0xa4 + 4 * (layer))
-#define SWAP_DEST(layer)        (0xc4 + 16 * (layer))   /* x, y, width, height on the display */
-#define SWAP_LAYERS_SET         0x104                   /* bit per layer given in this swap */
-#define SWAP_LAYERS_CLEARED     0x108
-#define SWAP_LAYERS             4
-
 #define kFBNotifyVSync          5
 #define kFBNotifyTypes          8
 #define kFBRefreshHz            60                      /* unless boot-arg fb_hz says otherwise */
@@ -92,20 +82,16 @@ enum {
 static uint64_t gFBLogged[2];           /* selectors already reported */
 static uint8_t  gFBCalls[128];          /* how many calls of each selector were traced */
 
-/*
- * The display user space is told about. The system carries the identity of the iPhone X
- * (see the loader), and iOS knows what screen that phone has: with any other size
- * MobileGestalt reports an unknown screen class and the user interface has no layout for it.
- * So the display is always the iPhone's, and a swap scales the picture to the panel that is
- * really there (in QEMU the loader makes the panel exactly this size and nothing is scaled).
- * Boot-args fbwidth= and fbheight= change the size reported.
- */
+/* MobileGestalt needs a matching width, height and pixel density to select a screen class.
+ * Defaults retain the D22 display. fbwidth/fbheight/fbpitch select another profile;
+ * fbpitch=0 retains density scaling for the existing reduced-resolution modes. */
 #define kFBDefaultWidth         1125
 #define kFBDefaultHeight        2436
 #define kFBDotsPerInch          458
 
 static TUNABLE(uint32_t, gFBWidth, "fbwidth", kFBDefaultWidth);
 static TUNABLE(uint32_t, gFBHeight, "fbheight", kFBDefaultHeight);
+static TUNABLE(uint32_t, gFBPitch, "fbpitch", 0);
 /*
  * Boot-arg fbscale=2: the same 375 x 812 points drawn at two pixels a point instead of three.
  * Everything that is drawn is drawn by the processor, and this is 2.25 times fewer pixels to
@@ -1295,7 +1281,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 		if (args->scalarOutputCount < 1) {
 			return kIOReturnBadArgument;
 		}
-		out[0] = kFBDotsPerInch * fOwner->fWidth / kFBDefaultWidth;
+		out[0] = gFBPitch ? gFBPitch : kFBDotsPerInch * fOwner->fWidth / kFBDefaultWidth;
 		args->scalarOutputCount = 1;
 		return kIOReturnSuccess;
 
@@ -1319,13 +1305,15 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 		args->scalarOutputCount = 1;
 		return kIOReturnSuccess;
 
-	case kFBMethodSwapEnd:
-		if (args->structureInput == NULL || args->structureInputSize < SWAP_SIZE) {
-			IOLog("MiniIOMobileFramebuffer: swap request of %u bytes, expected %u\n", args->structureInputSize, SWAP_SIZE);
+	case kFBMethodSwapEnd: {
+		const uint8_t * swap = miniFramebufferSwapPayload(args->structureInput, args->structureInputSize);
+		if (swap == NULL) {
+			IOLog("MiniIOMobileFramebuffer: unsupported swap request of %u bytes\n", args->structureInputSize);
 			return kIOReturnBadArgument;
 		}
-		fOwner->present((const uint8_t *) args->structureInput);
+		fOwner->present(swap);
 		return kIOReturnSuccess;
+	}
 
 	case kFBMethodSwapWait:                         /* a swap is on the screen as soon as it is made */
 		if (gTouchLat) {

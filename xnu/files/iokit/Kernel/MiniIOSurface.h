@@ -3,7 +3,7 @@
  * window server and its clients to share pixel buffers on a machine without Apple hardware.
  *
  * The protocol (user client selectors, traps and the layout of the structures the kernel
- * hands to IOSurface.framework) was worked out from the user-space side of iOS 16.5.
+ * hands to IOSurface.framework) follows iOS 16.5 (20F66) and iOS 26.6.2 (23G90).
  */
 #ifndef _IOKIT_MINIIOSURFACE_H
 #define _IOKIT_MINIIOSURFACE_H
@@ -14,64 +14,9 @@
 
 #include "MiniDrivers.h"
 
-#define MINISURF_MAX_PLANES     4
-#define MINISURF_RESULT_MAX     0xa68           /* what IOSurface.framework reserves for a result */
+#include "MiniIOSurfaceABI.h"
 
-/* One plane, as IOSurface.framework reads it (0x80 bytes). */
-struct minisurf_plane {
-	uint32_t width;                         /* 0x00 */
-	uint32_t height;                        /* 0x04 */
-	uint32_t reserved08;
-	uint32_t offset;                        /* 0x0c from the base address */
-	uint32_t bytesPerRow;                   /* 0x10 */
-	uint32_t size;                          /* 0x14 */
-	uint16_t bytesPerElement;               /* 0x18 */
-	uint8_t  elementWidth;                  /* 0x1a */
-	uint8_t  elementHeight;                 /* 0x1b */
-	uint8_t  componentCount;                /* 0x1c */
-	uint8_t  addressFormat;                 /* 0x1d */
-	uint8_t  reserved1e[2];
-	uint8_t  componentBitDepth[4];          /* 0x20 */
-	uint8_t  componentBitOffset[4];         /* 0x24 */
-	uint8_t  componentName[4];              /* 0x28 */
-	uint8_t  componentType[4];              /* 0x2c */
-	uint8_t  componentRange[4];             /* 0x30 */
-	uint8_t  reserved34[0x20];
-	uint8_t  compression;                   /* 0x54: 1 = compressed, then there is no base address */
-	uint8_t  reserved55[0x1b];
-	uint32_t extendedPixels[4];             /* 0x70 */
-};
-
-/* What "create" and the lookups return: this header, then the planes (at least one). */
-struct minisurf_result {
-	uint64_t base;                          /* 0x00 where the memory is mapped in the client */
-	uint64_t shared;                        /* 0x08 struct minisurf_shared, mapped in the client */
-	uint64_t aux;                           /* 0x10 struct minisurf_aux, mapped in the client */
-	uint32_t sid;                           /* 0x18 */
-	uint32_t allocSize;                     /* 0x1c */
-	uint32_t width;                         /* 0x20 */
-	uint32_t height;                        /* 0x24 */
-	uint32_t bytesPerRow;                   /* 0x28 */
-	uint32_t offset;                        /* 0x2c */
-	uint32_t pixelFormat;                   /* 0x30 */
-	uint32_t reserved34;
-	uint32_t planeCount;                    /* 0x38 */
-	uint32_t reserved3c;
-	uint16_t bytesPerElement;               /* 0x40 */
-	uint8_t  elementWidth;                  /* 0x42 */
-	uint8_t  elementHeight;                 /* 0x43 */
-	uint32_t cacheMode;                     /* 0x44 */
-	uint32_t lockSeed;                      /* 0x48 the client keeps the seed of its last lock here */
-	uint8_t  subsampling;                   /* 0x4c */
-	uint8_t  prohibitUseCount;              /* 0x4d */
-	uint16_t reserved4e;
-	uint32_t parentID;                      /* 0x50 */
-	uint32_t sliceCount;                    /* 0x54 */
-	uint64_t traceID;                       /* 0x58 */
-	uint64_t protectionOptions;             /* 0x60 */
-};
-
-/* State that every client reads straight from memory shared with the kernel. */
+/* Common shared fields retain these offsets; ABI helpers access YCbCr and attachments. */
 struct minisurf_shared {
 	uint64_t registryID;                    /* 0x00 */
 	uint16_t accelID;                       /* 0x08 */
@@ -104,6 +49,7 @@ class MiniIOSurface : public OSObject
 
 public:
 	uint32_t                        sid;
+	minisurf_abi                    sharedABI;      /* fixed by the first successful client mapping */
 	uint32_t                        holders;        /* clients, send rights, kernel users */
 	IOBufferMemoryDescriptor *      memory;         /* one page of shared state, then the pixels */
 	uint8_t *                       kbase;          /* the same, in the kernel */
@@ -128,6 +74,7 @@ public:
 	virtual bool
 	init(void) APPLE_KEXT_OVERRIDE
 	{
+		sharedABI = MINISURF_UNCLAIMED;
 		return OSObject::init();
 	}
 	virtual void free(void) APPLE_KEXT_OVERRIDE;

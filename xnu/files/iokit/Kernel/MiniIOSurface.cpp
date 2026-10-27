@@ -878,10 +878,11 @@ class IOSurfaceRootUserClient : public IOUserClient
 	struct minisurf_client_ref *    fRefs;
 	uint32_t                        fRefCount;
 	uint32_t                        fRefCapacity;
+	minisurf_abi                    fABI;
 	IOExternalTrap                  fTraps[kSurfaceTrapCount];
 
 	struct minisurf_client_ref * findRef(uint32_t sid, bool detached);
-	struct minisurf_client_ref * addRef(MiniIOSurface * surface);
+	struct minisurf_client_ref * addRef(MiniIOSurface * surface, IOReturn * error);
 	void dropRef(struct minisurf_client_ref * ref);
 	IOReturn returnSurface(struct minisurf_client_ref * ref, bool known, IOExternalMethodArguments * args);
 
@@ -924,6 +925,7 @@ IOSurfaceRootUserClient::initWithTask(task_t owningTask, void * securityID, UInt
 		return false;
 	}
 	fTask = owningTask;
+	fABI = MINISURF_UNCLAIMED;
 	return true;
 }
 
@@ -989,11 +991,17 @@ IOSurfaceRootUserClient::findRef(uint32_t sid, bool detached)
 }
 
 struct minisurf_client_ref *
-IOSurfaceRootUserClient::addRef(MiniIOSurface * surface)
+IOSurfaceRootUserClient::addRef(MiniIOSurface * surface, IOReturn * error)
 {
 	struct minisurf_client_ref * ref;
-	IOMemoryMap * map;
+	IOMemoryMap * map, * pixelMap = NULL;
 
+	minisurf_abi abi = fABI == MINISURF_UNCLAIMED ? MINISURF_ABI16 : fABI;
+	*error = kIOReturnUnsupported;
+	if (!minisurfCanMap(surface->sharedABI, abi)) {
+		return NULL;
+	}
+	*error = kIOReturnNoMemory;
 	if (fRefCount == fRefCapacity) {
 		uint32_t capacity = fRefCapacity ? fRefCapacity * 2 : 16;
 		struct minisurf_client_ref * refs = IONew(struct minisurf_client_ref, capacity);
@@ -1013,14 +1021,23 @@ IOSurfaceRootUserClient::addRef(MiniIOSurface * surface)
 		IOLog("MiniIOSurface: cannot map surface %u (%u bytes) into the client\n", surface->sid, surface->info.allocSize);
 		return NULL;
 	}
+	if (surface->client != NULL && surface->clientTask != fTask) {
+		pixelMap = surface->client->createMappingInTask(fTask, 0, kIOMapAnywhere);
+		if (pixelMap == NULL) {
+			map->release();
+			return NULL;
+		}
+	}
 	ref = &fRefs[fRefCount++];
 	bzero(ref, sizeof(*ref));
 	ref->surface = surface;
 	ref->map = map;
-	if (surface->client != NULL && surface->clientTask != fTask) {
-		ref->pixelMap = surface->client->createMappingInTask(fTask, 0, kIOMapAnywhere);
-	}
+	ref->pixelMap = pixelMap;
+	/* The shared page keeps its first mapped ABI for the surface lifetime. */
+	surface->sharedABI = abi;
+	fABI = abi;
 	surfaceHold(surface);
+	*error = kIOReturnSuccess;
 	return ref;
 }
 
@@ -1039,64 +1056,7 @@ IOSurfaceRootUserClient::dropRef(struct minisurf_client_ref * ref)
 	surfaceUnhold(s);
 }
 
-static uint32_t
-resultSize(const MiniIOSurface * s)
-{
-	uint32_t planes = s->info.planeCount ? s->info.planeCount : 1;
-
-	return (uint32_t) (sizeof(struct minisurf_result) + planes * sizeof(struct minisurf_plane));
-}
-
-/* Describe the surface to the client. known: it has the surface already, do not build a second view. */
-IOReturn
-IOSurfaceRootUserClient::returnSurface(struct minisurf_client_ref * ref, bool known, IOExternalMethodArguments * args)
-{
-	MiniIOSurface * s = ref->surface;
-	uint32_t size = resultSize(s);
-	struct minisurf_result * r = (struct minisurf_result *) args->structureOutput;
-	mach_vm_address_t address = ref->map->getAddress();
-
-	if (r == NULL || args->structureOutputSize < size) {
-		return kIOReturnBadArgument;
-	}
-	*r = s->info;
-	memcpy(r + 1, s->planes, size - sizeof(*r));
-	r->shared = address;
-	r->aux = address + MINISURF_AUX_OFFSET;
-	r->base = known ? ~0ULL : s->client == NULL ? address + PAGE_SIZE :
-	    ref->pixelMap != NULL ? ref->pixelMap->getAddress() : s->clientAddress;
-	args->structureOutputSize = size;
-	return kIOReturnSuccess;
-}
-
-IOReturn
-IOSurfaceRootUserClient::methodInit(IOExternalMethodArguments * args)
-{
-	struct {
-		uint32_t allocAlignMask;
-		uint32_t rowAlignMask;
-		uint32_t maxBytesPerRow;
-		uint32_t maxWidth;
-		uint32_t maxHeight;
-		uint16_t reserved;
-		uint16_t version;
-	} reply;
-
-	static_assert(sizeof(reply) == 0x18, "init reply");
-	if (args->structureOutput == NULL || args->structureOutputSize < sizeof(reply)) {
-		return kIOReturnBadArgument;
-	}
-	reply.allocAlignMask = (uint32_t) PAGE_MASK;
-	reply.rowAlignMask = MINISURF_ROW_ALIGN - 1;
-	reply.maxBytesPerRow = MINISURF_MAX_DIMENSION * 16;
-	reply.maxWidth = MINISURF_MAX_DIMENSION;
-	reply.maxHeight = MINISURF_MAX_DIMENSION;
-	reply.reserved = 0;
-	reply.version = 1;
-	memcpy(args->structureOutput, &reply, sizeof(reply));
-	args->structureOutputSize = sizeof(reply);
-	return kIOReturnSuccess;
-}
+#include "MiniIOSurfaceABI.inc"
 
 /* The serialized object in a request, or NULL. */
 static OSObject *
@@ -1198,17 +1158,20 @@ IOSurfaceRootUserClient::methodCreate(IOExternalMethodArguments * args)
 
 	uint64_t mapped_at = mach_absolute_time();
 	IOLockLock(gSurfaceLock);
-	ref = addRef(s);
-	ret = ref ? returnSurface(ref, false, args) : kIOReturnNoMemory;
+	ref = addRef(s, &ret);
+	if (ref != NULL) {
+		ret = returnSurface(ref, false, args);
+	}
 	if (ref != NULL && ret != kIOReturnSuccess) {
 		dropRef(ref);
 	}
+	uint32_t allocSize = s->info.allocSize;
 	surfaceUnhold(s);                       /* the creator's hold; the client's own is in the ref */
 	IOLockUnlock(gSurfaceLock);
 	mapped_at = mach_absolute_time() - mapped_at;
 	OSAddAtomic64((SInt64) (mach_absolute_time() - began), (SInt64 *) &gSurfaceMaking);
 	OSIncrementAtomic(&gSurfacesMade);
-	if (s->info.allocSize >= SURFACE_KEEP_FROM) {
+	if (allocSize >= SURFACE_KEEP_FROM) {
 		/* the big ones (the window server's of the whole display): where the time to make one goes, every 5 s */
 		static uint64_t since, all, making, mapping;
 		static uint32_t count;
@@ -1252,14 +1215,15 @@ IOSurfaceRootUserClient::methodLookup(IOExternalMethodArguments * args)
 	sid = (uint32_t) args->scalarInput[0];
 	IOLockLock(gSurfaceLock);
 	ref = findRef(sid, false);
+	bool known = ref != NULL;
 	if (ref == NULL && sid != 0 && sid < MINISURF_TABLE_SIZE && gSurfaceTable[sid] != NULL) {
-		ref = addRef(gSurfaceTable[sid]);
-		if (ref == NULL) {
-			ret = kIOReturnNoMemory;
-		}
+		ref = addRef(gSurfaceTable[sid], &ret);
 	}
 	if (ref != NULL) {
 		ret = returnSurface(ref, false, args);
+		if (!known && ret != kIOReturnSuccess) {
+			dropRef(ref);
+		}
 	}
 	IOLockUnlock(gSurfaceLock);
 	return ret;
@@ -1297,9 +1261,14 @@ IOSurfaceRootUserClient::methodLookupFromPort(IOExternalMethodArguments * args)
 	ref = findRef(right->surface->sid, false);
 	known = ref != NULL;
 	if (ref == NULL) {
-		ref = addRef(right->surface);
+		ref = addRef(right->surface, &ret);
 	}
-	ret = ref ? returnSurface(ref, known, args) : kIOReturnNoMemory;
+	if (ref != NULL) {
+		ret = returnSurface(ref, known, args);
+		if (!known && ret != kIOReturnSuccess) {
+			dropRef(ref);
+		}
+	}
 	IOLockUnlock(gSurfaceLock);
 	if (right->surface->traced) {
 		char procname[32] = "?";
@@ -1525,50 +1494,6 @@ IOSurfaceRootUserClient::methodCopyValue(IOExternalMethodArguments * args, const
 	return ret;
 }
 
-/*
- * Colour space, transfer function and the like: a fixed structure kept in the shared page.
- * The request: the structure, its size, a mask of the fields that changed, the surface number.
- */
-IOReturn
-IOSurfaceRootUserClient::methodSetBulkAttachments(const uint8_t * in, size_t inSize)
-{
-	static const struct {
-		uint8_t from, to;
-	} fields[15] = {
-		{ 0x00, 0x20 }, { 0x20, 0x30 }, { 0x30, 0x38 }, { 0x38, 0x39 }, { 0x39, 0x3a }, { 0x3a, 0x3b }, { 0x3b, 0x3c },
-		{ 0x3c, 0x3d }, { 0x3d, 0x3e }, { 0x3e, 0x3f }, { 0x3f, 0x40 }, { 0x40, 0x58 }, { 0x58, 0x5c }, { 0x5c, 0x64 },
-		{ 0x64, 0x65 },
-	};
-	uint64_t size, mask;
-	uint32_t sid;
-	struct minisurf_client_ref * ref;
-	IOReturn ret = kIOReturnNotFound;
-
-	if (inSize < 0x88) {
-		return kIOReturnBadArgument;
-	}
-	memcpy(&size, in + 0x70, sizeof(size));
-	memcpy(&mask, in + 0x78, sizeof(mask));
-	memcpy(&sid, in + 0x80, sizeof(sid));
-	if (size > 0x70) {
-		return kIOReturnBadArgument;
-	}
-	IOLockLock(gSurfaceLock);
-	ref = findRef(sid, false);
-	if (ref != NULL) {
-		uint8_t * attachments = ref->surface->shared()->attachments;
-
-		for (unsigned i = 0; i < 15; i++) {
-			if ((mask & (1ULL << i)) && fields[i].to <= size) {
-				memcpy(attachments + fields[i].from, in + fields[i].from, fields[i].to - fields[i].from);
-			}
-		}
-		ret = kIOReturnSuccess;
-	}
-	IOLockUnlock(gSurfaceLock);
-	return ret;
-}
-
 IOReturn
 IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArguments * args,
     IOExternalMethodDispatch * dispatch, OSObject * target, void * reference)
@@ -1657,7 +1582,7 @@ IOSurfaceRootUserClient::externalMethod(uint32_t selector, IOExternalMethodArgum
 		IOLockLock(gSurfaceLock);
 		ref = findRef((uint32_t) args->scalarInput[0], false);
 		if (ref != NULL) {
-			ref->surface->shared()->ycbcrMatrix = (uint32_t) args->scalarInput[1];
+			minisurfSetYCbCrMatrix(ref->surface->shared(), fABI, (uint32_t) args->scalarInput[1]);
 		}
 		IOLockUnlock(gSurfaceLock);
 		return ref ? kIOReturnSuccess : kIOReturnNotFound;
