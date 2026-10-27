@@ -12,6 +12,11 @@ struct payload_entry { char name[16]; uint32_t size; uint32_t reserved; };
 #define BASE_ALIGN          0x02000000ULL         /* 32 MB: L2 block size with 16K pages */
 #define MAX_MEM_SIZE        0x180000000ULL        /* 6 GB; the kernel's bootstrap page tables cover 8 */
 /*
+ * The payload's "memsize" may ask for more, for a kernel whose bootstrap page tables cover it (the
+ * xnu-12377 one, for iOS 26 and its 5 GB system image): up to this.
+ */
+#define MAX_MEM_SIZE_LIMIT  0x380000000ULL        /* 14 GB */
+/*
  * A root image too big for the payload area is placed here, at a fixed
  * offset inside the kernel's memory window, once; it then survives any
  * number of kernel runs (nothing writes to it: the root is read-only).
@@ -794,25 +799,45 @@ dt_prop_padded(struct dt_writer *w, const char *name, const char *value, uint32_
  */
 static int gamut_p3;    /* boot-arg gamut=p3 (a test): the iPhone's own "P3" left in place */
 
+struct identity_table { const struct identity_prop *props; uint32_t count; const unsigned char *data; };
+#define IDENTITY_TABLE(t) { t, sizeof(t) / sizeof(t[0]), t##_data }
+
+/*
+ * The iPhones the device tree can name, chosen by the payload's "identity" entry (mkpayload.py
+ * --identity); without it the iPhone X, for iOS 16.5. chip-id and board-id are the ApChipID and
+ * ApBoardID of the firmware's BuildManifest; the iPhone 17's device tree leaves platform-name empty
+ * (iBoot fills it in), so it is named here after the chip.
+ */
+static const struct identity {
+	const char *name, *platform;
+	uint32_t chip_id, board_id;
+	struct identity_table root, product, haptics, camera, buttons;
+} identities[] = {
+	{ "d22", "t8015", 0x8015, 0x06, IDENTITY_TABLE(identity_root), IDENTITY_TABLE(identity_product),
+	  IDENTITY_TABLE(identity_haptics), IDENTITY_TABLE(identity_camera), { NULL, 0, NULL } },
+	{ "v57", "t8150", 0x8150, 0x08, IDENTITY_TABLE(v57_identity_root), IDENTITY_TABLE(v57_identity_product),
+	  IDENTITY_TABLE(v57_identity_haptics), IDENTITY_TABLE(v57_identity_camera), IDENTITY_TABLE(v57_identity_buttons) },
+};
+
 static void
-dt_identity(struct dt_writer *w, const struct identity_prop *props, uint32_t count, const unsigned char *data)
+dt_identity(struct dt_writer *w, const struct identity_table *t)
 {
-	for (uint32_t i = 0; i < count; i++) {
-		if (str_eq(props[i].name, "artwork-display-gamut") && !gamut_p3) {
-			dt_prop(w, props[i].name, "sRGB", 5);
+	for (uint32_t i = 0; i < t->count; i++) {
+		if (str_eq(t->props[i].name, "artwork-display-gamut") && !gamut_p3) {
+			dt_prop(w, t->props[i].name, "sRGB", 5);
 			continue;
 		}
-		dt_prop(w, props[i].name, data + props[i].offset, props[i].length);
+		dt_prop(w, t->props[i].name, t->data + t->props[i].offset, t->props[i].length);
 	}
 }
 
 /* One property of those copied from the iPhone's device tree, by name. */
 static void
-dt_identity_one(struct dt_writer *w, const struct identity_prop *props, uint32_t count, const unsigned char *data, const char *name)
+dt_identity_one(struct dt_writer *w, const struct identity_table *t, const char *name)
 {
-	for (uint32_t i = 0; i < count; i++) {
-		if (str_eq(props[i].name, name)) {
-			dt_prop(w, props[i].name, data + props[i].offset, props[i].length);
+	for (uint32_t i = 0; i < t->count; i++) {
+		if (str_eq(t->props[i].name, name)) {
+			dt_prop(w, t->props[i].name, t->data + t->props[i].offset, t->props[i].length);
 		}
 	}
 }

@@ -495,6 +495,8 @@ starts_with(const char *s, const char *prefix)
 	return 1;
 }
 
+#include "loader_ramdisk.inc"
+
 /*
  * One command from the host. While a kernel runs on another core (running_live) only what does
  * not disturb it: questions, the screen, the log so far, and "oem stop". While memory and devices
@@ -512,6 +514,8 @@ fb_command(char *cmd)
 		if (lc_cmd_denied(kernel_resources_held, firmware_fault, live, cmd)) {
 			fb_reply("FAIL", live ? "a kernel is running (oem stop ends it)"
 			    : "a kernel may still hold memory or devices: reboot to start over");
+		} else if (ramdisk_command(cmd)) {
+			/* The RAM protocol uses the same command protection as legacy downloads. */
 		} else if (starts_with(cmd, "oem stop")) {
 			/* the kernel looks at this once a second and comes back as it does when its time is up */
 			int act = lc_stop_action(kernel_resources_held, live);
@@ -528,7 +532,7 @@ fb_command(char *cmd)
 			const char *var = cmd + 7;
 			if (fb_getvar_identity(var)) {   /* product, version and build-id answer from one block */
 			} else if (str_eq(var, "max-download-size")) {
-				fb_reply("OKAY", download_to_ramdisk ? "0xffffffff" : "0x03700000");
+				fb_reply("OKAY", (download_to_ramdisk || ramdisk_pending()) ? "0xffffffff" : "0x03700000");
 			} else if (str_eq(var, "result")) {
 				fb_reply("OKAY", last_result);
 			} else if (str_eq(var, "screen") && SCREEN.base != 0) {
@@ -545,32 +549,36 @@ fb_command(char *cmd)
 			/* "oem ramdisk": the next download is a root image for the resident area; "oem ramdisk none" drops it */
 			struct payload_info pi;
 
-			if (starts_with(cmd, "oem ramdisk none")) {
-				resident_rd_size = 0;
-				fb_reply("OKAY", "");
-				return;
-			}
 			parse_payload(&pi, 0);
 			log_len = 0;
 			if (!choose_window(&pi) || win_size <= RESIDENT_RD_OFFSET + RESIDENT_RD_RESERVE) {
 				fb_reply("FAIL", "no memory window");
 				return;
 			}
+			ramdisk_forget();
 			download_to_ramdisk = 1;
 			fb_reply("OKAY", "");
 		} else if (starts_with(cmd, "download:")) {
 			uint64_t total = parse_number(cmd + 9, 16), got = 0;
 			uint64_t limit = PAYLOAD_CONTAINER_MAX;
 			uint8_t *dest = (uint8_t *)PAYLOAD_BASE;
-			int to_ramdisk = download_to_ramdisk;
+			int streaming = ramdisk_pending();
+			int to_ramdisk = download_to_ramdisk || streaming;
 
 			download_to_ramdisk = 0;
-			if (to_ramdisk) {
+			if (streaming) {
+				if (!ramdisk_block_size(cmd + 9, &total)) {
+					fb_reply("FAIL", "ramdisk block rejected: cancel or begin again");
+					return;
+				}
+				limit = ramdisk_transfer.total - ramdisk_transfer.received;
+				dest = (uint8_t *)(win_base + RESIDENT_RD_OFFSET + ramdisk_transfer.received);
+			} else if (to_ramdisk) {
 				limit = win_size - RESIDENT_RD_OFFSET - RESIDENT_RD_RESERVE;
 				dest = (uint8_t *)(win_base + RESIDENT_RD_OFFSET);
 				resident_rd_size = 0;
 			}
-			if (total == 0 || total > limit) {
+			if (total == 0 || total > limit || total > 0xffffffffULL) {
 				fb_reply("FAIL", "bad size");
 				return;
 			}
@@ -592,10 +600,11 @@ fb_command(char *cmd)
 				memcpy(dest + got, usb_rx_buf, (size_t)r);
 				got += (uint64_t)r;
 			}
+			if (streaming) ramdisk_block_done(total, got);
 			if (got == total) {
-				if (to_ramdisk) {
+				if (to_ramdisk && !streaming) {
 					resident_rd_size = total;
-				} else {
+				} else if (!to_ramdisk) {
 					payload_bytes = total;   /* a complete container: parse may trust the header now */
 				}
 				fb_reply("OKAY", "");
@@ -818,6 +827,9 @@ usb_command_loop(void)
 		char cmd[128];
 		int64_t n;
 
+		if (!usb_connected || firmware_fault || usb_out_lost || usb_in_lost) {
+			ramdisk_fail();
+		}
 		if (!usb_connected) {
 			/* the link wait ends on a cable event: Connected returns so this loop submits
 			 * the first OUT; a disconnect just keeps waiting for the cable to come up */

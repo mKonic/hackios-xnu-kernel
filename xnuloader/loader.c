@@ -22,6 +22,7 @@
  */
 #include "efi.h"
 #include "identity.h"         /* who iOS shall think we are: from the iPhone's own device tree (mkidentity.py) */
+#include "identity_v57.h"     /* ... or the iPhone 17 (iPhone18,3) for iOS 26: mkidentity.py --prefix v57_ */
 
 #include "loader_01_base_log_dt.inc"
 #include "loader_02_platform_cpu_ufs_survey.inc"

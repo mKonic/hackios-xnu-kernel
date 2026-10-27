@@ -100,12 +100,13 @@ choose_window(const struct payload_info *pi)
 		}
 	}
 	print("largest free block %x size %x\n", best_base, best_size);
+	uint64_t max_mem = pi->max_mem != 0 ? pi->max_mem : MAX_MEM_SIZE;
 	if (pi->forced_base != 0) {
 		best_base = pi->forced_base;
-		best_size = MAX_MEM_SIZE;
+		best_size = max_mem;
 	}
-	if (best_size > MAX_MEM_SIZE) {
-		best_size = MAX_MEM_SIZE;
+	if (best_size > max_mem) {
+		best_size = max_mem;
 	}
 	/* UEFI stays alive while the kernel runs, so the kernel must own all of its window. */
 	uint64_t claim = best_base;
@@ -569,7 +570,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	/* the root is the first RAM disk unless the payload says otherwise */
 	int own_root = 0;
 	for (const char *c = pi.cmdline; *c; c++) {
-		own_root |= starts_with(c, "rd=") && (c == pi.cmdline || c[-1] == ' ');
+		own_root |= (starts_with(c, "rd=") || starts_with(c, "rootdev=")) && (c == pi.cmdline || c[-1] == ' ');
 	}
 	if (rd_size != 0 && !own_root) {
 		for (const char *c = "rd=md0 "; *c && n < BOOT_LINE_LENGTH - 1; c++) {
@@ -613,6 +614,13 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 
 	/* --- device tree ---------------------------------------------------- */
 	const struct platform *plat = PLAT;
+	const struct identity *id = &identities[0];
+	for (unsigned i = 0; pi.identity != NULL && i < sizeof(identities) / sizeof(identities[0]); i++) {
+		if (str_eq(pi.identity, identities[i].name)) {
+			id = &identities[i];
+		}
+	}
+	print("identity %s\n", id->name);
 	struct dt_writer w = { .base = (uint8_t *)dt_pa, .cur = (uint8_t *)dt_pa, .depth = 0 };
 	uint64_t cntfrq = READ_SYSREG(CNTFRQ_EL0);
 	uint64_t ranges[3] = { 0, plat->io_base, plat->io_size };
@@ -629,8 +637,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	 * its device up by these, and its files -- the dyld shared cache to begin with -- are
 	 * those of that phone. XNU itself does not care; the hardware is described further down.
 	 */
-	dt_identity(&w, identity_root, sizeof(identity_root) / sizeof(identity_root[0]), identity_root_data);
-	dt_prop_str(&w, "platform-name", "t8015");
+	dt_identity(&w, &id->root);
+	dt_prop_str(&w, "platform-name", id->platform);
 	/* what iBoot takes from the factory configuration of a real phone; fixed size fields */
 	dt_prop_padded(&w, "serial-number", "RDW00POCOX5P", 32);
 	dt_prop_padded(&w, "mlb-serial-number", "RDW00POCOX5PMLB00", 32);
@@ -665,8 +673,8 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	static const uint8_t manifest_hash[48] = { 0x72, 0x65, 0x64, 0x77, 0x6f, 0x6f, 0x64 };
 	static const uint8_t no_behavior[16];
 	dt_prop_u64(&w, "unique-chip-id", 0x000052445730001ULL);
-	dt_prop_u32(&w, "chip-id", 0x8015);
-	dt_prop_u32(&w, "board-id", 0x06);
+	dt_prop_u32(&w, "chip-id", id->chip_id);
+	dt_prop_u32(&w, "board-id", id->board_id);
 	dt_prop(&w, "mac-address-wifi0", wifi_address, sizeof(wifi_address));
 	dt_prop(&w, "mac-address-bluetooth0", bluetooth_address, sizeof(bluetooth_address));
 	dt_prop(&w, "boot-manifest-hash", manifest_hash, sizeof(manifest_hash));
@@ -722,7 +730,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 
 	/* the product: screen class, artwork scale, name ... as on the real phone */
 	dt_begin(&w, "product");
-	dt_identity(&w, identity_product, sizeof(identity_product) / sizeof(identity_product[0]), identity_product_data);
+	dt_identity(&w, &id->product);
 	/*
 	 * and its haptics: "closed-loop" (MobileGestalt's DeviceSupportsClosedLoopHaptics) makes iOS play
 	 * its vibrations and feedbacks as waveforms on the "Actuator" audio device (the audio plug-in
@@ -730,7 +738,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	 * that the iPhone X does not have, and nothing vibrates.
 	 */
 	dt_begin(&w, "haptics");
-	dt_identity(&w, identity_haptics, sizeof(identity_haptics) / sizeof(identity_haptics[0]), identity_haptics_data);
+	dt_identity(&w, &id->haptics);
 	dt_end(&w);
 	/*
 	 * and of its camera what is here: with torch=N the flash (MobileGestalt's camera-flash; without
@@ -740,11 +748,18 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	if (torch_requested || camera_requested) {
 		dt_begin(&w, "camera");
 		if (torch_requested) {
-			dt_identity_one(&w, identity_camera, sizeof(identity_camera) / sizeof(identity_camera[0]), identity_camera_data, "flash");
+			dt_identity_one(&w, &id->camera, "flash");
 		}
 		dt_end(&w);
 	}
 	dt_end(&w);
+
+	/* MobileGestalt reads the home-button type from this identity node. */
+	if (id->buttons.count) {
+		dt_begin(&w, "buttons");
+		dt_identity(&w, &id->buttons);
+		dt_end(&w);
+	}
 
 	/* IOKit publishes its NVRAM object on this node; without it IOKit asserts. */
 	dt_begin(&w, "options");

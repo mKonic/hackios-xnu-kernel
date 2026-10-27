@@ -170,6 +170,8 @@ struct payload_info {
 	const char *cmdline;
 	uint64_t checkpoint;
 	uint64_t forced_base;
+	uint64_t max_mem;               /* "memsize": the window's largest size, if not MAX_MEM_SIZE */
+	const char *identity;           /* "identity": which iPhone iOS is told it runs on (identities[]) */
 	uint64_t resident_rd;           /* size of a root image the host put at the resident address */
 	char rdfile_part[40];           /* a staged system image to read from a real GPT partition (k90-port) */
 	uint64_t rdfile_size;
@@ -285,6 +287,22 @@ parse_payload(struct payload_info *pi, int verbose)
 				break;
 			}
 			pi->forced_base = parse_number(text, 16); /* testing aid; must be free RAM */
+		} else if (str_eq(e->name, "memsize")) {
+			if (!nul_within(text, e->size)) {
+				bad = 1;
+				break;
+			}
+			pi->max_mem = parse_number(text, 16) & ~(BASE_ALIGN - 1);
+			if (pi->max_mem > MAX_MEM_SIZE_LIMIT) {
+				bad = 1;
+				break;
+			}
+		} else if (str_eq(e->name, "identity")) {
+			if (!nul_within(text, e->size)) {
+				bad = 1;
+				break;
+			}
+			pi->identity = text;
 		} else if (str_eq(e->name, "rdres")) {
 			if (!nul_within(text, e->size)) {
 				bad = 1;

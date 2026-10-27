@@ -34,12 +34,15 @@ kernel=/ramdisk= items plus flags build unchanged.
 """
 import argparse, hashlib, struct, sys
 
-FLAG_OWNED = ('cmdline', 'physbase', 'rdres', 'rdfile', 'usb', 'checkpoint')
+FLAG_OWNED = ('cmdline', 'physbase', 'rdres', 'rdfile', 'usb', 'checkpoint', 'memsize', 'identity')
 
 ap = argparse.ArgumentParser()
 ap.add_argument('-o', '--output', required=True)
 ap.add_argument('--cmdline', default='')
 ap.add_argument('--physbase', default='', help='hex: force XNU physical base (testing)')
+ap.add_argument('--memsize', default='', help="hex: the largest memory window, for a kernel whose bootstrap page tables cover it (default 6 GB)")
+ap.add_argument('--identity', default='', choices=('', 'd22', 'v57'),
+                help='the iPhone the device tree names: d22 (iPhone X, the default, iOS 16.5) or v57 (iPhone 17, iOS 26)')
 ap.add_argument('--usb', action='store_true', help='make the loader stay resident and take commands over USB')
 ap.add_argument('--rdres', default='', help='hex size of a root image already placed at the resident address (QEMU)')
 ap.add_argument('--rdfile', default='', help='partition:size[:offset|tail] - staged system image on a GPT partition (phone)')
@@ -130,7 +133,8 @@ if args.exact_cmd:
 entries = list(inputs)
 for name, present in (('cmdline', args.cmdline), ('physbase', args.physbase),
                       ('rdres', args.rdres), ('rdfile', args.rdfile),
-                      ('usb', args.usb), ('checkpoint', args.checkpoint)):
+                      ('usb', args.usb), ('checkpoint', args.checkpoint), ('memsize', args.memsize),
+                      ('identity', args.identity)):
     if present:
         entries.append(name)
 for bad in args.forbid_entry:
@@ -150,6 +154,10 @@ if args.cmdline:
     add('cmdline', args.cmdline.encode() + b'\0')
 if args.physbase:
     add('physbase', args.physbase.lower().replace('0x', '').encode() + b'\0')
+if args.memsize:
+    add('memsize', args.memsize.lower().replace('0x', '').encode() + b'\0')
+if args.identity:
+    add('identity', args.identity.encode() + b'\0')
 if args.rdres:
     add('rdres', args.rdres.lower().replace('0x', '').encode() + b'\0')
 if args.rdfile:
