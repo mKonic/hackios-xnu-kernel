@@ -13,6 +13,7 @@
 #include <arm/thread.h>
 #include <kern/debug.h>
 #include <kern/misc_protos.h>
+#include <kern/spl.h>
 #include <kern/startup.h>
 #include <kern/task.h>
 #include <kern/thread.h>
@@ -21,6 +22,12 @@
 #include <string.h>
 #include <vm/vm_map.h>
 #include <vm/vm_shared_region.h>
+#if __has_include(<vm/vm_map_xnu.h>)
+/* xnu-12377: the map and shared-region interfaces used here, and a map switch that returns a context */
+#include <vm/vm_map_xnu.h>
+#include <vm/vm_shared_region_xnu.h>
+#define VM_MAP_SWITCH_CONTEXT 1
+#endif
 
 extern char *proc_name_address(struct proc *p);
 
@@ -196,12 +203,19 @@ ustacks_task(task_t task, struct proc *proc)
 	static struct {
 		uint64_t tid, pc, lr, fp;
 		int state;
+		unsigned block_hint;
+		int16_t sched_pri, base_pri, req_base_pri;
 		char name[64];          /* (bsd_getthreadname() copies MAXTHREADNAMESIZE, 64) */
 	} snap[USTACKS_MAX_THREADS];
 	char line[512];
 	int at;
 	vm_shared_region_t region;
-	vm_map_t map, old_map;
+	vm_map_t map;
+#if VM_MAP_SWITCH_CONTEXT
+	vm_map_switch_context_t old_map;
+#else
+	vm_map_t old_map;
+#endif
 	thread_t thread;
 	uint32_t slide = 0;
 	unsigned count = 0;
@@ -223,7 +237,16 @@ ustacks_task(task_t task, struct proc *proc)
 			continue;
 		}
 		snap[count].tid = thread_tid(thread);
+		/* Scheduler fields share thread_lock; saved user registers are a separate observation. */
+		spl_t s = splsched();
+		thread_lock(thread);
 		snap[count].state = thread->state;
+		snap[count].block_hint = thread->block_hint;
+		snap[count].sched_pri = thread->sched_pri;
+		snap[count].base_pri = thread->base_pri;
+		snap[count].req_base_pri = thread->req_base_pri;
+		thread_unlock(thread);
+		splx(s);
 		snap[count].pc = get_saved_state_pc(state);
 		snap[count].lr = get_saved_state_lr(state);
 		snap[count].fp = get_saved_state_fp(state);
@@ -253,9 +276,19 @@ ustacks_task(task_t task, struct proc *proc)
 	    proc_name_address(proc), proc_pid(proc), count, slide, (unsigned long)secs, (unsigned)usecs / 1000, nanos / 1000);
 	ustacks_say(line);
 
+#if VM_MAP_SWITCH_CONTEXT
+	old_map = vm_map_switch_to(map);
+#else
 	old_map = vm_map_switch(map);
+#endif
 	for (unsigned i = 0; i < count; i++) {
 		uint64_t frame[2], fp = snap[i].fp;
+
+		/* Interpret block_hint as a current wait only while TH_WAIT is set. */
+		snprintf(line, sizeof(line), "ustate: thread 0x%llx state 0x%x block_hint 0x%x sched_pri %d base_pri %d req_base_pri %d\n",
+		    (unsigned long long)snap[i].tid, (unsigned)snap[i].state, snap[i].block_hint,
+		    snap[i].sched_pri, snap[i].base_pri, snap[i].req_base_pri);
+		ustacks_say(line);
 
 		/* (a thread that runs shows where it last came into the kernel, not where it is) */
 		at = snprintf(line, sizeof(line), "ustacks:  thread 0x%llx%s%s%s%s: 0x%llx 0x%llx", (unsigned long long)snap[i].tid,
@@ -276,7 +309,11 @@ ustacks_task(task_t task, struct proc *proc)
 		snprintf(line + at, sizeof(line) - at, "\n");
 		ustacks_say(line);
 	}
+#if VM_MAP_SWITCH_CONTEXT
+	vm_map_switch_back(old_map);
+#else
 	vm_map_switch(old_map);
+#endif
 	vm_map_deallocate(map);
 }
 

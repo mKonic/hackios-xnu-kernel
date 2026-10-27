@@ -14,6 +14,16 @@ ml_enable_monitor(void)
 }
 
 /*
+ * xnu-12377 asks it for the sysctl kern.eng_sample_dev_fused (bsd/kern/kern_mib.c): this board
+ * passes for a production device, as the iPhone it stands in for is one.
+ */
+boolean_t
+ml_device_is_prod_fused(void)
+{
+	return TRUE;
+}
+
+/*
  * On Apple cores the "_nohid" variant skips toggling a HID chicken bit;
  * elsewhere it is simply a forced clean to the point of coherency.
  */
