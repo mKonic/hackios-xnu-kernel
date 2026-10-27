@@ -1,0 +1,22 @@
+diff --git a/bsd/kern/kern_memorystatus_internal.h b/bsd/kern/kern_memorystatus_internal.h
+index 8c9d6b2bd496..34fb747fb1eb 100644
+--- a/bsd/kern/kern_memorystatus_internal.h
++++ b/bsd/kern/kern_memorystatus_internal.h
+@@ -277,7 +277,16 @@ memorystatus_action_t memorystatus_pick_action(jetsam_state_t state,
+     bool suspended_swappable_apps_remaining,
+     bool swappable_apps_remaining, int *jld_idle_kills);
+ 
+-#define MEMSTAT_PERCENT_TOTAL_PAGES(p) ((uint32_t)(p * atop_64(max_mem) / 100))
++/*
++ * redwood: the memory there is to manage. max_mem is the whole of the kernel's memory window, and
++ * here more than half of that window is the system image -- a RAM disk the kernel boots from, which
++ * is nobody's to use or to give back. Thresholds that are per cent of max_mem had idle daemons
++ * killed with a quarter of the usable memory still available, and the window server not long after.
++ * sane_size leaves the image (and the kernel itself) out.
++ */
++#define memstat_memory_size     sane_size
++
++#define MEMSTAT_PERCENT_TOTAL_PAGES(p) ((uint32_t)(p * atop_64(memstat_memory_size) / 100))
+ 
+ /*
+  * Take a (redacted) zprint snapshot along with the jetsam snapshot.

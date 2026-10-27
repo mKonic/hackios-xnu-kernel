@@ -1,0 +1,37 @@
+diff --git a/bsd/miscfs/mockfs/mockfs_fsnode.c b/bsd/miscfs/mockfs/mockfs_fsnode.c
+index e00012622e77..4f993b3cd47f 100644
+--- a/bsd/miscfs/mockfs/mockfs_fsnode.c
++++ b/bsd/miscfs/mockfs/mockfs_fsnode.c
+@@ -85,7 +85,7 @@ mockfs_fsnode_create(mount_t mp, uint8_t type, mockfs_fsnode_t * fsnpp)
+ 		goto done;
+ 	}
+ 
+-	*fsnpp = kalloc_type(mockfs_fsnode_t, Z_WAITOK | Z_ZERO | Z_NOFAIL);
++	*fsnpp = kalloc_type(struct mockfs_fsnode, Z_WAITOK | Z_ZERO | Z_NOFAIL);
+ 	(*fsnpp)->size = new_size;
+ 	(*fsnpp)->type = type;
+ 	(*fsnpp)->mnt = mp;
+@@ -154,7 +154,7 @@ mockfs_fsnode_destroy(mockfs_fsnode_t fsnp)
+ 		}
+ 	}
+ 
+-	kfree_type(mockfs_fsnode_t, fsnp);
++	kfree_type(struct mockfs_fsnode, fsnp);
+ done:
+ 	return rvalue;
+ }
+@@ -345,10 +345,12 @@ mockfs_fsnode_vnode(mockfs_fsnode_t fsnp, vnode_t * vpp)
+ 				panic("mockfs_fsvnode failed to get ubc_mem_object for a new vnode");
+ 			}
+ 
+-			rvalue = pager_map_to_phys_contiguous(ubc_mem_object, 0, (mockfs_mnt->mockfs_memdev_base << PAGE_SHIFT), fsnp->size);
++			/* memdev counts its base in 4K pages whatever the kernel page size is (see bsd/dev/memdev.c) */
++			rvalue = pager_map_to_phys_contiguous(ubc_mem_object, 0, (mockfs_mnt->mockfs_memdev_base << 12), fsnp->size);
+ 
+ 			if (rvalue) {
+-				panic("mockfs_fsnode_vnode failed to create fictitious pages for a memory-backed device; rvalue = %d", rvalue);
++				panic("mockfs_fsnode_vnode failed to create fictitious pages for a memory-backed device; rvalue = %d, base page 0x%llx, size 0x%llx",
++				    rvalue, (unsigned long long)mockfs_mnt->mockfs_memdev_base, (unsigned long long)fsnp->size);
+ 			}
+ 		}
+ 

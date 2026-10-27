@@ -1,0 +1,13 @@
+diff --git a/osfmk/kern/cpu_number.h b/osfmk/kern/cpu_number.h
+index 3e2f8ad6c032..75f67791f5b2 100644
+--- a/osfmk/kern/cpu_number.h
++++ b/osfmk/kern/cpu_number.h
+@@ -60,6 +60,8 @@
+ #define _KERN_CPU_NUMBER_H_
+ 
+ extern int boot_cpu_id;
++/* redwood: the name xnu-8796 has for it, which the drivers shared with that kernel (xnu/files) use */
++#define master_cpu boot_cpu_id
+ 
+ #include <machine/cpu_number.h>
+ 

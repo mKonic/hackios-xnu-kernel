@@ -1,0 +1,23 @@
+diff --git a/bsd/miscfs/devfs/devfs_vfsops.c b/bsd/miscfs/devfs/devfs_vfsops.c
+index f14f1957d9b2..702485af2b35 100644
+--- a/bsd/miscfs/devfs/devfs_vfsops.c
++++ b/bsd/miscfs/devfs/devfs_vfsops.c
+@@ -112,8 +112,18 @@ devfs_init(__unused struct vfsconf *vfsp)
+ 	if (devfs_sinit()) {
+ 		return ENOTSUP;
+ 	}
++#if defined(ARM64_BOARD_CONFIG_BCM2837)
++	/*
++	 * Readable by all: launchd opens StandardErrorPath /dev/console read-write in daemons that run
++	 * as their own users (_logd, _distnote). init used to chmod it; xnu-12377 refuses that for
++	 * /dev/console (devfs_is_vnode_protected()).
++	 */
++	devfs_make_node(makedev(0, 0), DEVFS_CHAR,
++	    UID_ROOT, GID_WHEEL, 0666, "console");
++#else
+ 	devfs_make_node(makedev(0, 0), DEVFS_CHAR,
+ 	    UID_ROOT, GID_WHEEL, 0622, "console");
++#endif
+ 	devfs_make_node(makedev(2, 0), DEVFS_CHAR,
+ 	    UID_ROOT, GID_WHEEL, 0666, "tty");
+ #if CONFIG_DEV_KMEM

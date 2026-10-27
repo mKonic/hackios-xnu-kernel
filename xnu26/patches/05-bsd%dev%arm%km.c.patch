@@ -1,0 +1,28 @@
+diff --git a/bsd/dev/arm/km.c b/bsd/dev/arm/km.c
+index 3acfc7b534d1..d740b570dc50 100644
+--- a/bsd/dev/arm/km.c
++++ b/bsd/dev/arm/km.c
+@@ -199,6 +199,15 @@ kmioctl(dev_t dev, u_long cmd, caddr_t data, int flag, proc_t p)
+ 		error = EINVAL;
+ 		break;
+ 
++	case TIOCSCTTY:
++		/*
++		 * The console is every daemon's standard error in this system. If
++		 * the first session leader to open it took it for its controlling
++		 * terminal, its exit would revoke the console for all the others.
++		 */
++		error = ENOTTY;
++		break;
++
+ 	/* Bodge in the CLOCAL flag as the km device is always local */
+ 	case TIOCSETA_32:
+ 	case TIOCSETAW_32:
+@@ -246,6 +255,7 @@ fallthrough:
+  *		assumptions here, this routine should be static (and
+  *		inlined, given there is only one call site).
+  */
++
+ int
+ kmputc(__unused dev_t dev, char c)
+ {

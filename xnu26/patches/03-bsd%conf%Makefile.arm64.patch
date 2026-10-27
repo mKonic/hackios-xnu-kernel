@@ -1,0 +1,16 @@
+diff --git a/bsd/conf/Makefile.arm64 b/bsd/conf/Makefile.arm64
+index a4d25040f38f..aad72993d139 100644
+--- a/bsd/conf/Makefile.arm64
++++ b/bsd/conf/Makefile.arm64
+@@ -5,6 +5,11 @@
+ # Inline assembly doesn't interact well with LTO
+ fbt_arm.o_CFLAGS_ADD += $(CFLAGS_NOLTO_FLAG)
+ 
++# libdeflate's arm headers (bsd/miscfs/apfs/libdeflate) include the compiler's own <arm_acle.h>
++# and <arm_neon.h>, which the kernel's include paths do not have: they come after those paths,
++# so the kernel's <stdint.h> and the rest are still the ones found.
++apfs_deflate.o_CFLAGS_ADD += -idirafter $(shell $(CC) -print-resource-dir)/include
++
+ kern_csr.o_INCFLAGS += -I$(SRCROOT)/osfmk
+ kern_debug.o_INCFLAGS += -I$(SRCROOT)/osfmk
+ 

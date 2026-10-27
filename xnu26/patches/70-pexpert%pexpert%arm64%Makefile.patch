@@ -1,0 +1,14 @@
+diff --git a/pexpert/pexpert/arm64/Makefile b/pexpert/pexpert/arm64/Makefile
+index 75938b564825..9d094bf20898 100644
+--- a/pexpert/pexpert/arm64/Makefile
++++ b/pexpert/pexpert/arm64/Makefile
+@@ -33,7 +33,8 @@ PRIVATE_KERNELFILES = \
+ 	H15.h \
+ 	H16.h \
+ 	H17.h \
+-	VMAPPLE.h
++	VMAPPLE.h \
++	BCM2837.h
+ 
+ 
+ # Headers installed into System.framework/PrivateHeaders (userspace internal SDK only).

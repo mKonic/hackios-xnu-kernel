@@ -1,0 +1,19 @@
+diff --git a/osfmk/kern/zalloc.c b/osfmk/kern/zalloc.c
+index 9edf8c5c0c01..6a876dd412c7 100644
+--- a/osfmk/kern/zalloc.c
++++ b/osfmk/kern/zalloc.c
+@@ -170,6 +170,14 @@ ZONE_DEFINE_TYPE(percpu_u64_zone, "percpu.64", uint64_t,
+ #if   XNU_PLATFORM_MacOSX
+ #define ZONE_MAP_MAX            (32ULL << 30)
+ #define ZONE_MAP_VA_SIZE        (128ULL << 30)
++#elif defined(ARM64_BOARD_CONFIG_BCM2837)
++/*
++ * Without KTRR the kernel heap lies between the physical aperture and the CPU
++ * windows: about 43 GB less the RAM size. With 24 GB of zone VA a RAM window of
++ * more than ~8 GB leaves nothing for the kmem ranges (kmem_range_init panics).
++ */
++#define ZONE_MAP_MAX            (8ULL << 30)
++#define ZONE_MAP_VA_SIZE        (16ULL << 30)
+ #else
+ #define ZONE_MAP_MAX            (8ULL << 30)
+ #define ZONE_MAP_VA_SIZE        (24ULL << 30)

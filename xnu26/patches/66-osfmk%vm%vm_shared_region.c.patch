@@ -1,0 +1,24 @@
+diff --git a/osfmk/vm/vm_shared_region.c b/osfmk/vm/vm_shared_region.c
+index 0b688296aed7..2938b448bf97 100644
+--- a/osfmk/vm/vm_shared_region.c
++++ b/osfmk/vm/vm_shared_region.c
+@@ -3345,6 +3345,9 @@ vm_shared_region_slide_page_v3(
+ 			} else {
+ 				memcpy(rebaseLocation, &value, sizeof(value));
+ 			}
++#else /* !__has_feature(ptrauth_calls) */
++			/* a kernel without pointer authentication sliding an arm64e cache (BCM2837): the plain pointer */
++			memcpy(rebaseLocation, &value, sizeof(value));
+ #endif /* __has_feature(ptrauth_calls) */
+ 		} else {
+ 			// The new value for a rebase is the low 51-bits of the threaded value plus the slide.
+@@ -3564,6 +3567,9 @@ vm_shared_region_slide_page_v5(
+ 			} else {
+ 				memcpy(rebaseLocation, &value, sizeof(value));
+ 			}
++#else /* !__has_feature(ptrauth_calls) */
++			/* a kernel without pointer authentication sliding an arm64e cache (BCM2837): the plain pointer */
++			memcpy(rebaseLocation, &value, sizeof(value));
+ #endif /* __has_feature(ptrauth_calls) */
+ 		} else {
+ 			// the value already has the correct low bits, so just add in the high8 if it exists

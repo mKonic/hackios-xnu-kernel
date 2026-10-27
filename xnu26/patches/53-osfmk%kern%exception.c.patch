@@ -1,0 +1,39 @@
+diff --git a/osfmk/kern/exception.c b/osfmk/kern/exception.c
+index 29d7dbe745fa..d8c582048670 100644
+--- a/osfmk/kern/exception.c
++++ b/osfmk/kern/exception.c
+@@ -739,6 +739,11 @@ check_exc_receiver_dependency(
+  *	Returns:
+  *		KERN_SUCCESS if exception is handled by any of the handlers.
+  */
++#if defined(__arm64__)
++extern void user_exception_trace(exception_type_t exception, mach_exception_data_t code,
++    mach_msg_type_number_t count, thread_t thread);
++#endif
++
+ kern_return_t
+ exception_triage_thread(
+ 	exception_type_t        exception,
+@@ -753,6 +758,11 @@ exception_triage_thread(
+ 	struct exception_action *actions;
+ 	kern_return_t   kr = KERN_FAILURE;
+ 
++#if defined(__arm64__)
++	/* bring-up aid, see osfmk/arm64/user_exception_trace.c */
++	user_exception_trace(exception, code, codeCnt, thread);
++#endif
++
+ 	assert(exception != EXC_RPC_ALERT);
+ 
+ 	/*
+@@ -879,6 +889,10 @@ maybe_unrecoverable_exception_triage(
+ 	int pid = proc_selfpid();
+ 	char *proc_name = proc_name_address(proc);
+ 	os_log_error(OS_LOG_DEFAULT, "%s: process %s[%d] hit an unrecoverable exception\n", __func__, proc_name, pid);
++#if defined(__arm64__)
++	/* the process never reaches exception_triage_thread(): describe it here (bring-up aid) */
++	user_exception_trace(exception, code, 2, current_thread());
++#endif
+ 
+ 	exception_info_t info = {
+ 		/*

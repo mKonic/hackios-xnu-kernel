@@ -1,0 +1,84 @@
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index 19e7e67a276c..ac9f640fcd3c 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -93,6 +93,8 @@
+ 
+ #include <pexpert/device_tree.h>
+ 
++MARK_AS_PMAP_TEXT static void pmap_phys_write_disable(vm_address_t va);
++
+ #include <san/kasan.h>
+ #include <sys/cdefs.h>
+ 
+@@ -1943,7 +1945,12 @@ pmap_map_bd_with_options(
+ 
+ 	switch (options & PMAP_MAP_BD_MASK) {
+ 	case PMAP_MAP_BD_WCOMB:
++#if defined(ARM64_BOARD_CONFIG_BCM2837)
++		/* Normal non-cacheable outside DRAM as well: see VM_WIMG_WCOMB in wimg_to_pte() */
++		if (true) {
++#else
+ 		if (is_dram_addr(start)) {
++#endif
+ 			mem_attr = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_WRITECOMB);
+ 		} else {
+ #if HAS_FEAT_XS
+@@ -4952,8 +4959,8 @@ pmap_page_protect_options_with_flush_range(
+ 			}
+ #endif
+ 			if (remove && (options & PMAP_OPTIONS_COMPRESSOR)) {
+-				panic("pmap_page_protect: attempt to compress ppnum 0x%x owned by iommu %p, pve_p=%p",
+-				    ppnum, ptep_get_iommu(pte_p), pve_p);
++				panic("pmap_page_protect: attempt to compress ppnum 0x%x owned by iommu, pte_p=%p, pve_p=%p",
++				    ppnum, pte_p, pve_p);
+ 			}
+ 			goto protect_skip_pve_pass1;
+ 		}
+@@ -6028,7 +6035,16 @@ wimg_to_pte(unsigned int wimg, pmap_paddr_t pa)
+ 		pte |= ARM_PTE_NX | ARM_PTE_PNX;
+ 		break;
+ 	case VM_WIMG_WCOMB:
++#if defined(ARM64_BOARD_CONFIG_BCM2837)
++		/*
++		 * Normal non-cacheable outside DRAM as well, as in xnu-8796: the panic region and
++		 * the framebuffers lie outside the kernel's memory window and are accessed
++		 * unaligned (the panic header is packed), which faults on Device memory.
++		 */
++		if (true) {
++#else
+ 		if (is_dram_addr(pa)) {
++#endif
+ 			pte = ARM_PTE_ATTRINDX(CACHE_ATTRINDX_WRITECOMB);
+ 		} else {
+ #if HAS_FEAT_XS
+@@ -7235,7 +7251,8 @@ void
+ pmap_sync_page_attributes_phys(
+ 	ppnum_t pp)
+ {
+-	flush_dcache((vm_offset_t) (pp << PAGE_SHIFT), PAGE_SIZE, TRUE);
++	/* (redwood: the page number is 32 bits wide and memory goes on above 4 GB: widen before shifting) */
++	flush_dcache((vm_offset_t) pp << PAGE_SHIFT, PAGE_SIZE, TRUE);
+ }
+ 
+ #if CONFIG_COREDUMP
+@@ -12243,7 +12260,8 @@ pmap_cs_lockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
+ #if XNU_MONITOR
+ 	pmap_ppl_lockdown_pages(kva, size, PVH_FLAG_LOCKDOWN_CS, ppl_writable);
+ #else
+-	pmap_ppl_lockdown_pages(kva, size, 0, ppl_writable);
++	/* No PPL on this platform: nothing to lock down. */
++	(void)kva; (void)size; (void)ppl_writable;
+ #endif
+ }
+ 
+@@ -12253,7 +12271,8 @@ pmap_cs_unlockdown_pages(vm_address_t kva, vm_size_t size, bool ppl_writable)
+ #if XNU_MONITOR
+ 	pmap_ppl_unlockdown_pages(kva, size, PVH_FLAG_LOCKDOWN_CS, ppl_writable);
+ #else
+-	pmap_ppl_unlockdown_pages(kva, size, 0, ppl_writable);
++	/* No PPL on this platform: nothing to lock down. */
++	(void)kva; (void)size; (void)ppl_writable;
+ #endif
+ }
+ 
