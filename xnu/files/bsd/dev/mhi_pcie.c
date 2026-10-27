@@ -34,7 +34,7 @@
  * sizing test, written all-ones and restored, every write read back. Nothing happens at all
  * unless a boot-arg asks:
  *
- *   pcie=N   run steps 1 through N, clamped to 4.
+ *   pcie=N   run steps 1 through N, clamped to 6.
  *
  *   step 1  read-only, the clock controller and the pin controller only: the two PCIe power
  *           domains, the root complex's clocks, and the six pins the device tree wires to the
@@ -53,7 +53,14 @@
  *   step 4  MHI: if the card got a BAR0 inside the inbound memory window (device tree ranges,
  *           cpu 0x40300000 for 0x3d00000, unmapped), it is mapped and the device's state read.
  *
- * No firmware download, no BHI, no doorbells: those are the batches after this one. Without
+ *   step 5  read BHI execution environment, status and errors, BHIe transmit status, and the
+ *           PARF RID 0x100 to SID table chain. Requires the known WCN7850 and a live link.
+ *
+ *   step 6  read only SCR0, IDR0 and IDR1 from apps SMMU after checking that PCIe remains powered
+ *           and linked. The SMMU window is read once at its global page; SID and context scans are
+ *           a later step after this access succeeds on the device.
+ *
+ * Firmware download and doorbell writes remain separate work. Without
  * pcie_power=1 nothing persists -- everything written is restored -- so there is no quiesce on the
  * way out. pcie_power=1 with pcie=2 or more powers root complex 0 and the card up between steps 1
  * and 2 when step 1 finds them off (mhi_pcie_power.c); that is left on until the reset.
@@ -199,6 +206,13 @@ static const struct { uint32_t offset; const char *name; } pcie0_clocks[] = {
 #define MHI_DEBUGOFF              0x30
 #define MHI_CTRL                  0x38              /* [15:8] what the host asks for, bit 1 its reset */
 #define MHI_STATUS                0x48              /* [15:8] what the device is, bit 2 SYS_ERR */
+
+/* SM8750 apps SMMU, device-tree reg 0x15000000+0x100000. */
+#define APPS_SMMU_PHYS             0x15000000UL
+#define APPS_SMMU_SIZE             0x00100000UL
+#define SMMU_SCR0                  0x000
+#define SMMU_IDR0                  0x020
+#define SMMU_IDR1                  0x024
 
 static vm_offset_t parf, phy, dm_core, conf, pcie_sm, gcc, tlmm;
 static uint32_t ep_vendor, ep_device, ep_bar0, ep_bar1;
@@ -523,7 +537,7 @@ probe_endpoint(void)
 	region0_read(iatu, save);
 	printf("pcie: step 3: region 0 was type %#x %s cpu %#010x..%#010x -> %#010x; remapped to config for the probe\n",
 	    save[0] & 0x1f, (save[1] & IATU_ENABLE) ? "enabled" : "disabled", save[2], save[4], save[5]);
-	__bzero(want, sizeof(want));
+	bzero(want, sizeof(want));
 	want[0] = secondary <= 1 ? IATU_TYPE_CFG0 : IATU_TYPE_CFG1;
 	want[1] = IATU_ENABLE;                                /* the vendor enables what it programs, line 3601 */
 	want[2] = CONF_PHYS;
@@ -558,8 +572,155 @@ probe_endpoint(void)
 
 /* ---- step 4: the card's MHI face ------------------------------------------------------------ */
 
+/* qcom_pcie_config_sid_1_9_0 hashes the big-endian RID with CRC8-MSB, polynomial 0x07. */
+static uint8_t
+rid_hash(uint16_t rid)
+{
+	uint8_t crc = 0;
+
+	for (int shift = 8; shift >= 0; shift -= 8) {
+		crc ^= (uint8_t)(rid >> shift);
+		for (unsigned bit = 0; bit < 8; bit++) {
+			crc = (uint8_t)((crc << 1) ^ ((crc & 0x80) ? 0x07 : 0));
+		}
+	}
+	return crc;
+}
+
 static void
-read_mhi(void)
+read_sid_route(void)
+{
+	const uint16_t rid = 0x100;
+	uint32_t cfg, secondary = (rd(dm_core + 0x18) >> 8) & 0xff;
+	uint8_t index = rid_hash(rid);
+	bool seen[256] = { false };
+
+	if (secondary != 1) {
+		printf("pcie: step 5: secondary bus %u; RID 0x100 survey skipped\n", secondary);
+		return;
+	}
+	cfg = rd(parf + 0x2c00);
+	printf("pcie: step 5: PARF BDF_TO_SID_CFG %#010x, bypass %u, RID %#x hash %#x\n",
+	    cfg, cfg & 1, rid, index);
+	if (cfg == 0xffffffffu) {
+		printf("pcie: step 5: invalid SID configuration read; table left unread\n");
+		return;
+	}
+	/* Only follow this RID's collision chain. NEXT is an 8-bit index; zero ends the chain. */
+	for (unsigned hops = 0; hops < 256; hops++) {
+		uint32_t offset = 0x2000 + 4u * index, entry;
+
+		if (seen[index] || offset > PARF_SIZE - sizeof(uint32_t)) {
+			printf("pcie: step 5: SID chain loop or invalid offset at index %#x; stopped\n", index);
+			return;
+		}
+		seen[index] = true;
+		entry = rd(parf + offset);
+		printf("pcie: step 5: SID table[%#x] %#010x, RID %#x relative SID %#x next %#x\n",
+		    index, entry, entry >> 16, (entry >> 8) & 0xff, entry & 0xff);
+		if (entry == 0xffffffffu) {
+			printf("pcie: step 5: invalid SID table read; stopped\n");
+			return;
+		}
+		if ((entry >> 16) == rid) {
+			printf("pcie: step 5: RID %#x found, relative SID %#x; DT expects 1 (SID 0x1401), bypass %u\n",
+			    rid, (entry >> 8) & 0xff, cfg & 1);
+			return;
+		}
+		if ((entry & 0xff) == 0) {
+			printf("pcie: step 5: RID %#x absent from its SID chain\n", rid);
+			return;
+		}
+		index = (uint8_t)entry;
+	}
+	printf("pcie: step 5: SID chain reached the 256-entry limit\n");
+}
+
+/* First apps SMMU access is limited to three global identification/configuration registers. */
+static void
+read_apps_smmu_header(void)
+{
+	vm_offset_t smmu;
+	uint32_t scr0, idr0, idr1;
+
+	mhi_pcie_pause("step 6: map apps SMMU global registers");
+	if (!show_power() || !(rd(dm_core + PCIE20_LINKCTRLSTATUS) & LINK_ACTIVE) ||
+	    ep_vendor != WCN_VENDOR || ep_device != WCN7850_DEVICE) {
+		printf("pcie: step 6: PCIe power, link or endpoint check failed; apps SMMU left unread\n");
+		return;
+	}
+	printf("pcie: step 6: map apps SMMU global page at %#lx (window %#lx); next read SCR0/IDR0/IDR1\n",
+	    (unsigned long)APPS_SMMU_PHYS, (unsigned long)APPS_SMMU_SIZE);
+	mhi_pcie_pause("step 6: read apps SMMU SCR0, IDR0 and IDR1");
+	smmu = ml_io_map(APPS_SMMU_PHYS, 0x1000);
+	if (smmu == 0) {
+		printf("pcie: step 6: apps SMMU global page mapping failed\n");
+		return;
+	}
+	printf("pcie: step 6: apps SMMU global page mapped; reading SCR0 at offset %#x\n", SMMU_SCR0);
+	scr0 = rd(smmu + SMMU_SCR0);
+	idr0 = rd(smmu + SMMU_IDR0);
+	idr1 = rd(smmu + SMMU_IDR1);
+	if (scr0 == UINT32_MAX || idr0 == UINT32_MAX || idr1 == UINT32_MAX) {
+		printf("pcie: step 6: invalid apps SMMU global read: SCR0 %#010x IDR0 %#010x IDR1 %#010x\n",
+		    scr0, idr0, idr1);
+		return;
+	}
+	printf("pcie: step 6: apps SMMU SCR0 %#010x IDR0 %#010x IDR1 %#010x; no SMR/S2CR or context registers read\n",
+	    scr0, idr0, idr1);
+}
+
+/* BHI/BHIe offsets are device supplied. Keep every read in the already mapped first 4 KiB. */
+static bool
+boot_registers_fit(uint32_t offset, uint32_t last)
+{
+	return offset >= 0x100 && (offset & 3) == 0 && offset <= 0x1000 - last - sizeof(uint32_t);
+}
+
+static void
+read_mhi_boot(vm_offset_t mhi, uint32_t where)
+{
+	uint32_t bhi, bhie;
+
+	mhi_pcie_pause("step 5: BHI, BHIe and RID-to-SID registers");
+	if (!show_power()) {
+		printf("pcie: step 5: power or clocks unavailable; stopped\n");
+		return;
+	}
+	if (!(rd(dm_core + PCIE20_LINKCTRLSTATUS) & LINK_ACTIVE) ||
+	    ep_vendor != WCN_VENDOR || ep_device != WCN7850_DEVICE ||
+	    (where & (BAR0_SIZE - 1)) != 0 || where > PCIE_MEM_END - BAR0_SIZE) {
+		printf("pcie: step 5: link, endpoint or BAR0 range check failed; stopped\n");
+		return;
+	}
+	printf("pcie: step 5: read BHI and BHIe status\n");
+	bhi = rd(mhi + MHI_BHIOFF);
+	bhie = rd(mhi + MHI_BHIEOFF);
+	if (boot_registers_fit(bhi, 0x3c)) {
+		uint32_t ee = rd(mhi + bhi + 0x28), status = rd(mhi + bhi + 0x2c);
+		static const char *const names[] = { "PBL", "SBL", "AMSS", "RDDM", "WFW", "PTHRU", "EDL", "FP" };
+
+		printf("pcie: step 5: BHI offset %#x EXECENV %#x (%s) STATUS %#010x (transfer %u)\n",
+		    bhi, ee, ee < sizeof(names) / sizeof(names[0]) ? names[ee] : "unknown", status, status >> 30);
+		printf("pcie: step 5: BHI ERRCODE %#010x ERRDBG1 %#010x ERRDBG2 %#010x ERRDBG3 %#010x\n",
+		    rd(mhi + bhi + 0x30), rd(mhi + bhi + 0x34), rd(mhi + bhi + 0x38), rd(mhi + bhi + 0x3c));
+	} else {
+		printf("pcie: step 5: BHI offset %#x outside aligned first-page range; skipped\n", bhi);
+	}
+	if (boot_registers_fit(bhie, 0x44)) {
+		uint32_t status = rd(mhi + bhie + 0x44);
+
+		printf("pcie: step 5: BHIe offset %#x TXVECSTATUS %#010x (transfer %u sequence %#x)\n",
+		    bhie, status, status >> 30, status & 0x3fffffffu);
+	} else {
+		printf("pcie: step 5: BHIe offset %#x outside aligned first-page range; skipped\n", bhie);
+	}
+	printf("pcie: step 5: read PARF RID-to-SID configuration\n");
+	read_sid_route();
+}
+
+static void
+read_mhi(bool boot_status)
 {
 	vm_offset_t mhi;
 	uint32_t ctrl, status, state, where = ep_bar0 & ~0xfu;
@@ -624,6 +785,9 @@ read_mhi(void)
 	    state == 0x00 ? "the device is held in reset: nobody powered its bus up" :
 	    (status & (1u << 2)) || state == 0xff ? "the card hit an internal error before we got here" :
 	    "readable, which is all this batch came for");
+	if (boot_status) {
+		read_mhi_boot(mhi, where);
+	}
 }
 
 /* ---- the run -------------------------------------------------------------------------------- */
@@ -713,7 +877,10 @@ pcie_thread(void *parameter, __unused wait_result_t result)
 		goto out;
 	}
 	printf("pcie: step 4: read the MHI face of the card, if it has one yet\n");
-	read_mhi();
+	read_mhi(steps >= 5);
+	if (steps >= 6) {
+		read_apps_smmu_header();
+	}
 
 out:
 	printf("pcie: the survey is over: %s%s; %s\n",
@@ -734,8 +901,8 @@ mhi_pcie_init(void)
 	}
 	PE_parse_boot_argn("pcie_pause", &pause_s, sizeof(pause_s));
 	PE_parse_boot_argn("pcie_power", &power, sizeof(power));
-	if (steps > 4) {
-		steps = 4;
+	if (steps > 6) {
+		steps = 6;
 	}
 	if (kernel_thread_start(pcie_thread, (void *)(uintptr_t)steps, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
