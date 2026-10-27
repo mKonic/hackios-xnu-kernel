@@ -338,6 +338,7 @@ audio_recording_init(void)
 void
 redwood_audio_init(void)
 {
+	annibale_reboot_probe();
 	int major = cdevsw_add(-1, &audio_cdevsw);
 
 	if (major < 0 || devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "redwood-audio") == NULL) {
