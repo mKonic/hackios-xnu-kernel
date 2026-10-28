@@ -19,7 +19,7 @@
 #   xl stop             end the run in progress now (the kernel returns as when its time is up)
 #   xl hang             watchdog test: make the loader hang on purpose
 #   xl reboot           cold-reset the phone (back to Android)
-#   xl restore-recovery put back the recovery partition saved before the first ENTER=recovery write
+#   xl restore-boot-a   put back the boot_a saved before the first ENTER=slot-a write
 #   xl reload           restart the phone into a freshly built loader (after changing xnuloader/)
 #   xl memmap           the phone's memory map as its firmware reports it
 #   xl state            where is the phone right now
@@ -79,49 +79,43 @@ wait_for() { # wait_for <state> <seconds>
 	return 1
 }
 
-# ENTER=recovery (phones whose bootloader refuses `fastboot boot`): from rooted Android, write the image
-# to the current slot's recovery partition and boot that. The partition as it was is saved once, in
-# out/<device>-recovery<slot>.orig.img, before anything is written (xl restore-recovery).
-recovery_part() {
-	local slot
-	slot=$(adb shell getprop ro.boot.slot_suffix | tr -d '\r')
-	[ -n "$slot" ] || { echo "xl: Android gave no slot suffix" >&2; return 1; }
-	echo "$slot"
-}
+# ENTER=slot-a (the NX789J: its bootloader refuses `fastboot boot`, and fastbootd lives in recovery,
+# which stays untouched): from rooted Android, write the image to boot_a -- slot a is the spare, marked
+# unbootable -- and give slot a one attempt (design/nx789j/oneshot-slot-a.py: priority 3, one try, not
+# successful). The bootloader starts slot a once; the next reboot spends the try, marks a unbootable
+# again and goes back to b (Android) on its own. boot_a as it was is saved once, in
+# out/<device>-boot_a.orig.img, before anything is written (xl restore-boot-a).
 part_sha() { # part_sha <partition> <bytes>
 	adb shell "su -c 'head -c $2 $1 | sha256sum'" | cut -d' ' -f1
 }
-enter_recovery() { # enter_recovery <image>
-	local img=$1 slot part size want orig
-	slot=$(recovery_part) || return 1
-	part=/dev/block/by-name/recovery$slot
-	orig=out/$DEVICE-recovery$slot.orig.img
-	size=$(stat -c %s "$img")
-	want=$(sha256sum < "$img" | cut -d' ' -f1)
-	if [ "$(part_sha $part $size)" != "$want" ]; then
+write_part() { # write_part <image> <partition>
+	adb push "$1" /data/local/tmp/xl-part.img >/dev/null &&
+		adb shell "su -c 'dd if=/data/local/tmp/xl-part.img of=$2 bs=1048576 conv=fsync 2>/dev/null; rm /data/local/tmp/xl-part.img'" &&
+		[ "$(part_sha "$2" "$(stat -c %s "$1")")" = "$(sha256sum < "$1" | cut -d' ' -f1)" ] ||
+		{ echo "xl: $2 does not read back as $1"; return 1; }
+}
+enter_slot_a() { # enter_slot_a <image>
+	local img=$1 part=/dev/block/by-name/boot_a orig=out/$DEVICE-boot_a.orig.img
+	[ "$(adb shell getprop ro.boot.slot_suffix | tr -d '\r')" = _b ] ||
+		{ echo "xl: Android is not running from slot b: not touching slot a"; return 1; }
+	if [ "$(part_sha $part "$(stat -c %s "$img")")" != "$(sha256sum < "$img" | cut -d' ' -f1)" ]; then
 		if [ ! -s "$orig" ]; then
-			echo "xl: saving recovery$slot as it is to $orig"
+			echo "xl: saving boot_a as it is to $orig"
 			adb exec-out "su -c 'cat $part'" > "$orig.tmp" &&
 				[ "$(sha256sum < "$orig.tmp" | cut -d' ' -f1)" = "$(adb shell "su -c 'sha256sum $part'" | cut -d' ' -f1)" ] &&
-				mv "$orig.tmp" "$orig" || { rm -f "$orig.tmp"; echo "xl: could not save recovery$slot"; return 1; }
+				mv "$orig.tmp" "$orig" || { rm -f "$orig.tmp"; echo "xl: could not save boot_a"; return 1; }
 		fi
-		echo "xl: writing $img to recovery$slot"
-		adb push "$img" /data/local/tmp/xl-boot.img >/dev/null &&
-			adb shell "su -c 'dd if=/data/local/tmp/xl-boot.img of=$part bs=1048576 conv=fsync 2>/dev/null; rm /data/local/tmp/xl-boot.img'" &&
-			[ "$(part_sha $part $size)" = "$want" ] || { echo "xl: recovery$slot does not read back as $img"; return 1; }
+		echo "xl: writing $img to boot_a"
+		write_part "$img" $part || return 1
 	fi
-	adb reboot recovery
+	python3 design/nx789j/oneshot-slot-a.py --write || { echo "xl: slot a not armed"; return 1; }
+	adb reboot
 }
-restore_recovery() {
-	local slot part orig
+restore_boot_a() {
+	local orig=out/$DEVICE-boot_a.orig.img
 	[ "$(state)" = android ] || { echo "xl: needs the phone in Android (state: $(state))"; return 1; }
-	slot=$(recovery_part) || return 1
-	part=/dev/block/by-name/recovery$slot orig=out/$DEVICE-recovery$slot.orig.img
 	[ -s "$orig" ] || { echo "xl: no saved $orig"; return 1; }
-	adb push "$orig" /data/local/tmp/xl-orig.img >/dev/null &&
-		adb shell "su -c 'dd if=/data/local/tmp/xl-orig.img of=$part bs=1048576 conv=fsync 2>/dev/null; rm /data/local/tmp/xl-orig.img'" &&
-		[ "$(part_sha $part "$(stat -c %s "$orig")")" = "$(sha256sum < "$orig" | cut -d' ' -f1)" ] &&
-		echo "xl: recovery$slot restored from $orig"
+	write_part "$orig" /dev/block/by-name/boot_a && echo "xl: boot_a restored from $orig"
 }
 
 enter() {
@@ -133,13 +127,13 @@ enter() {
 	case "$(state)" in
 	loader) return 0 ;;
 	android)
-		if [ "$ENTER" = recovery ]; then
-			enter_recovery "$img" || return 1
+		if [ "$ENTER" = slot-a ]; then
+			enter_slot_a "$img" || return 1
 			wait_for loader 120 && return 0
 			echo "xl: loader did not come up on USB (state: $(state))"; return 1
 		fi
 		adb reboot bootloader; wait_for fastboot 60 || { echo "xl: phone did not reach fastboot"; return 1; } ;;
-	fastboot) [ "$ENTER" = recovery ] && { echo "xl: this phone's fastboot cannot boot images: start from Android ('fastboot continue' gets there)"; return 1; } ;;
+	fastboot) [ "$ENTER" = slot-a ] && { echo "xl: this phone's fastboot cannot boot images: start from Android ('fastboot continue' gets there)"; return 1; } ;;
 	absent) echo "xl: waiting for the phone (Android or fastboot)..."
 		local i; for ((i = 0; i < 180; i += 3)); do [ "$(state)" != absent ] && break; sleep 3; done
 		[ "$(state)" = absent ] && { echo "xl: phone not reachable"; return 1; }
@@ -353,7 +347,7 @@ memmap) enter && fb oem memmap >/dev/null && fb oem log >/dev/null && fetch_log 
 hang) enter && fb oem hang; echo "xl: waiting for the watchdog..."; t0=$(date +%s); wait_for android 150 && echo "xl: back in Android after $(( $(date +%s) - t0 )) s" || echo "xl: not back (state: $(state))" ;;
 reboot) not_anothers_run reboot && fb reboot ;;
 reload) [ "$(state)" = loader ] && { fb reboot >/dev/null; wait_for android 120; }; enter && echo "xl: loader is up" ;;
-restore-recovery) restore_recovery ;;
+restore-boot-a) restore_boot_a ;;
 state) state ;;
 *) awk 'NR > 1 && /^#/ { print; next } NR > 1 { exit }' "$0" ;;
 esac
