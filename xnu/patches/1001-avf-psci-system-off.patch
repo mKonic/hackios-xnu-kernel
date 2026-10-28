@@ -1,5 +1,5 @@
 diff --git a/osfmk/arm64/loader_return.c b/osfmk/arm64/loader_return.c
-index a058bb5..4aae8b6 100644
+index e22e168..b8e92c4 100644
 --- a/osfmk/arm64/loader_return.c
 +++ b/osfmk/arm64/loader_return.c
 @@ -24,6 +24,7 @@
@@ -8,9 +8,9 @@ index a058bb5..4aae8b6 100644
  #include <pexpert/arm64/board_config.h>
 +#include <pexpert/arm/protos.h>
  #include <vm/vm_page.h>
- #include <vm/vm_compressor.h>
- 
-@@ -358,6 +359,70 @@ loader_log_append_msgbuf(void)
+ /* (xnu-12377 declares it in no header; osfmk/kern/debug.c does the same) */
+ extern int vsnprintf(char *, size_t, const char *, va_list);
+@@ -402,6 +403,70 @@ loader_log_append_msgbuf(void)
  	}
  }
  
@@ -81,7 +81,7 @@ index a058bb5..4aae8b6 100644
  void
  loader_return(void)
  {
-@@ -395,6 +460,7 @@ loader_return(void)
+@@ -442,6 +507,7 @@ loader_return(void)
  		}
  	}
  	loader_jump(0, 0);

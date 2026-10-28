@@ -27,11 +27,11 @@ index 43b1ea6..ce18544 100644
  	    &cs_relax_platform_task_ports,
  	    sizeof(cs_relax_platform_task_ports));
 diff --git a/bsd/kern/kern_minimac.c b/bsd/kern/kern_minimac.c
-index f65c979..1c840d7 100644
+index 26820ab..d971fb6 100644
 --- a/bsd/kern/kern_minimac.c
 +++ b/bsd/kern/kern_minimac.c
-@@ -39,8 +39,53 @@
- #include <vm/vm_map.h>
+@@ -42,8 +42,53 @@
+ #endif
  #include <security/mac_framework.h>
  #include <security/mac_policy.h>
 +#include <pexpert/pexpert.h>
@@ -84,8 +84,8 @@ index f65c979..1c840d7 100644
  
  static int
  miniamfi_vnode_check_signature(__unused struct vnode *vp, __unused struct label *label, __unused cpu_type_t cpu_type,
-@@ -87,7 +132,7 @@ miniamfi_vnode_check_signature(__unused struct vnode *vp, __unused struct label
- #define AMFI_BOOTARG_STATE_NOT_ENFORCING 0x86ULL
+@@ -162,7 +207,7 @@ miniamfi_match_constraint(user_addr_t arg)
+ }
  
  static int
 -miniamfi_policy_syscall(__unused struct proc *p, int call, user_addr_t arg)
@@ -93,9 +93,9 @@ index f65c979..1c840d7 100644
  {
  	struct {
  		uint64_t input_flags;
-@@ -98,8 +143,16 @@ miniamfi_policy_syscall(__unused struct proc *p, int call, user_addr_t arg)
- 	int error;
- 
+@@ -176,8 +221,16 @@ miniamfi_policy_syscall(__unused struct proc *p, int call, user_addr_t arg)
+ 		return miniamfi_match_constraint(arg);
+ 	}
  	if (call == AMFI_SYSCALL_QUERY_BOOTARG_STATE) {
 +		if (minimac_security_level() == MINIMAC_SECURITY_FULL) {
 +			state = 0;              /* enforcing (ExtensionKit then wants AMFI's service, which is not here) */
@@ -110,7 +110,7 @@ index f65c979..1c840d7 100644
  	if (call != AMFI_SYSCALL_CHECK_DYLD_POLICY) {
  		return ENOPOLICY;               /* what user space got before there was a handler */
  	}
-@@ -322,7 +375,7 @@ minisandbox_priv_grant(kauth_cred_t cred, int priv)
+@@ -400,7 +453,7 @@ minisandbox_priv_grant(kauth_cred_t cred, int priv)
  	static unsigned seen_count;
  	proc_t proc = current_proc();
  
@@ -119,7 +119,7 @@ index f65c979..1c840d7 100644
  		return 0;
  	}
  	/* (the entitlements are the current process's: only for a question about its own credential) */
-@@ -364,6 +417,14 @@ SECURITY_READ_ONLY_LATE(static mac_policy_handle_t) minisandbox_handle;
+@@ -442,6 +495,14 @@ SECURITY_READ_ONLY_LATE(static mac_policy_handle_t) minisandbox_handle;
  void
  minimac_policy_init(void)
  {
