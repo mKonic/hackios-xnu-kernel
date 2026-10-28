@@ -437,7 +437,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	/* "bootcpu=N" among the kernel's arguments: run it on core N (see run_on_other_cpu) */
 	uint64_t this_mpidr = READ_SYSREG(MPIDR_EL1) & 0xFFFFFF, kernel_mpidr = this_mpidr;
 	/* "cpus=N" or "cpumask=M" there too: the kernel may have more cores than the one it starts on */
-	int more_cores = 0, battery_requested = 0, ufs_requested = 0;
+	int battery_requested = 0, ufs_requested = 0;
 	/* "torch=N" (not 0) there too: the phone's flashlight is the kernel's (bsd/dev/redwood_torch.c) */
 	int torch_requested = 0;
 	/* "cam=5" there too: the phone's wide camera is iOS's (bsd/dev/redwood_camera.c) */
@@ -452,7 +452,6 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		if (starts_with(c, "bootcpu=") && (c == pi.cmdline || c[-1] == ' ') && c[8] >= '0' && c[8] <= '7') {
 			kernel_mpidr = PLAT->core_mpidr[c[8] - '0'];
 		}
-		more_cores |= (starts_with(c, "cpus=") || starts_with(c, "cpumask=")) && (c == pi.cmdline || c[-1] == ' ');
 		battery_requested |= starts_with(c, "battery=1") && (c == pi.cmdline || c[-1] == ' ') &&
 		    (c[9] == 0 || c[9] == ' ');
 		torch_requested |= starts_with(c, "torch=") && (c == pi.cmdline || c[-1] == ' ') && c[6] >= '1' && c[6] <= '9';
@@ -560,12 +559,6 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	uint32_t n = 0;
 	for (const char *c = base_cmdline; *c && n < BOOT_LINE_LENGTH - 1; c++) {
 		ba->commandLine[n++] = *c;
-	}
-	/* one processor unless the payload asks for more (of two "cpus=" the kernel takes the first) */
-	if (!more_cores) {
-		for (const char *c = "cpus=1 "; *c && n < BOOT_LINE_LENGTH - 1; c++) {
-			ba->commandLine[n++] = *c;
-		}
 	}
 	/* the root is the first RAM disk unless the payload says otherwise */
 	int own_root = 0;
@@ -711,7 +704,7 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 		dt_prop(&w, "RAMDisk1", second, sizeof(second));
 	}
 	dt_end(&w);
-	if (more_cores && plat->timeout_scale != 0) {
+	if (plat->timeout_scale != 0) {
 		/* multiplies every "machine timeout" of the kernel (machine_timeout_init_with_suffix()) */
 		dt_begin(&w, "machine-timeouts");
 		dt_prop_u32(&w, "global-scale", plat->timeout_scale);
@@ -777,8 +770,9 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	dt_pci_node(&w);
 
 	/*
-	 * The processors. The first is the one the kernel starts on. With "cpus=N" in its
-	 * arguments the kernel takes that one and the next N-1 of this list and starts them
+	 * The processors. The first is the one the kernel starts on; every core the firmware says is
+	 * off follows. The kernel takes them all, or with "cpus=N" in its arguments that one and the
+	 * next N-1 of this list and starts them
 	 * itself (PSCI CPU_ON); "cpumask=M" picks by position, bit 0 being the first. So the
 	 * order matters: after the boot core come those whose numbers are nearest to its own
 	 * (on the phone, where the kernel boots on the biggest core, 7: the other big ones
@@ -788,32 +782,30 @@ run_kernel(int have_checkpoint, uint64_t checkpoint)
 	uint64_t cpu_mpidr[8] = { kernel_mpidr };
 	int cpu_count = 1, boot_core = platform_core_index(plat, kernel_mpidr);
 
-	if (more_cores) {
-		for (int distance = 1; distance < plat->cores; distance++) {
-			for (int side = 0; side < 2; side++) {
-				int core = side == 0 ? boot_core + distance : boot_core - distance;
-				uint64_t mpidr;
-				int64_t state;
+	for (int distance = 1; distance < plat->cores; distance++) {
+		for (int side = 0; side < 2; side++) {
+			int core = side == 0 ? boot_core + distance : boot_core - distance;
+			uint64_t mpidr;
+			int64_t state;
 
-				if (core < 0 || core >= plat->cores) {
-					continue;
-				}
-				mpidr = plat->core_mpidr[core];
-				if (mpidr == this_mpidr) { continue; }
-				state = psci_call(PSCI_AFFINITY_INFO, mpidr, 0, 0);
-				if (state == 1 || state == PSCI_NOT_SUPPORTED) {
-					cpu_mpidr[cpu_count++] = mpidr;
-				} else if (state >= 0) {
-					print("core %x is not off (the firmware says %d): not the kernel's to take\n", mpidr, (uint64_t)state);
-				}
+			if (core < 0 || core >= plat->cores) {
+				continue;
+			}
+			mpidr = plat->core_mpidr[core];
+			if (mpidr == this_mpidr) { continue; }
+			state = psci_call(PSCI_AFFINITY_INFO, mpidr, 0, 0);
+			if (state == 1 || state == PSCI_NOT_SUPPORTED) {
+				cpu_mpidr[cpu_count++] = mpidr;
+			} else if (state >= 0) {
+				print("core %x is not off (the firmware says %d): not the kernel's to take\n", mpidr, (uint64_t)state);
 			}
 		}
-		print("cores for the kernel, in the order it takes them:");
-		for (int i = 0; i < cpu_count; i++) {
-			print(" %x", cpu_mpidr[i]);
-		}
-		print("\n");
 	}
+	print("cores for the kernel, in the order it takes them:");
+	for (int i = 0; i < cpu_count; i++) {
+		print(" %x", cpu_mpidr[i]);
+	}
+	print("\n");
 
 	dt_begin(&w, "cpus");
 	for (int i = 0; i < cpu_count; i++) {
