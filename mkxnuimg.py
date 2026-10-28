@@ -18,6 +18,8 @@ Another device (common/devices/<name>.conf, read by common/build.sh) sets these 
   PAYLOAD_CAP   strict payload contract (annibale): container limit C in bytes, passed to the
                 shim as -DPAYLOAD_CAP. Set = strict checks below; unset = legacy shape (redwood,
                 QEMU) keeps its original container check and byte stream.
+  BOOT_HEADER   Android boot image header version (default 1). 4 for bootloaders that take only
+                v3/v4 images (NX789J: its ABL boots a flashed partition, never `fastboot boot`)
 """
 import argparse, gzip, os, struct, subprocess, sys
 
@@ -201,7 +203,7 @@ def main():
     open(kernel, 'wb').write(gzip.compress(blob, 6) + dtb)
     try:
         subprocess.check_call([sys.executable, parts['mkbootimg'], '--kernel', kernel, '--ramdisk', parts['ramdisk'],
-                               '--header_version', '1', '-o', args.output])
+                               '--header_version', os.environ.get('BOOT_HEADER') or '1', '-o', args.output])
     finally:
         os.unlink(kernel)
     print(f'{args.output}: {os.path.getsize(args.output)} bytes (shim {len(shim)}, uncompressed {len(blob)})')
