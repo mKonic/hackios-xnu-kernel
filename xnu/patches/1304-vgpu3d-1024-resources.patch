@@ -1,0 +1,12 @@
+diff --git a/bsd/dev/redwood_vgpu3d_xnu.c b/bsd/dev/redwood_vgpu3d_xnu.c
+--- a/bsd/dev/redwood_vgpu3d_xnu.c
++++ b/bsd/dev/redwood_vgpu3d_xnu.c
+@@ -64,7 +64,7 @@
+ #define VGPU3D_IOC_SHOWN        _IOWR('G', 6, uint32_t)
+ 
+ #define MAX_OPENS               32
+-#define MAX_RES                 64
++#define MAX_RES                 1024            /* CoreAnimation goes through hundreds of IOSurfaces (gfx frees the dead ones) */
+ #define PIPE_SIZE               (1u << 20)
+ #define MAX_ENTRIES             3000            /* ATTACH_BACKING entries: 48 KiB of command */
+ 
