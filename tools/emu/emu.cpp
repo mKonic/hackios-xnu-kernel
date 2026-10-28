@@ -303,6 +303,7 @@ void Emu::load_icons() {
 
 // Brings the screen texture up to date with what QEMU last sent.
 void Emu::update_texture() {
+	std::lock_guard<std::mutex> lock(link.scanout_mutex());
 	emu::Scanout& s = link.scanout();
 	drawn_serial = s.serial;
 	// Only a picture of the panel's shape is the phone's: before the guest has one (the loader and the
@@ -357,6 +358,7 @@ void Emu::draw() {
 
 // Saves the guest's frame at its own resolution, straight from the scanout QEMU sent.
 bool Emu::screenshot() {
+	std::unique_lock<std::mutex> lock(link.scanout_mutex());
 	emu::Scanout& s = link.scanout();
 	if (!have_frame) return false;
 	std::vector<uint8_t> rgba(s.pixels.size());
@@ -368,13 +370,16 @@ bool Emu::screenshot() {
 	std::time_t now = std::time(nullptr);
 	std::strftime(file, sizeof file, "/emu-%Y%m%d-%H%M%S.png", std::localtime(&now));
 	out += file;
-	bool ok = emu::write_png(out, rgba.data(), s.width, s.height);
+	uint32_t w = s.width, h = s.height;
+	lock.unlock();
+	bool ok = emu::write_png(out, rgba.data(), w, h);
 	if (ok) std::printf("emu: screenshot %s\n", out.c_str());
 	std::fflush(stdout);
 	return ok;
 }
 
 bool Emu::on_screen(float x, float y, double* gx, double* gy) const {
+	std::lock_guard<std::mutex> lock(const_cast<Emu*>(this)->link.scanout_mutex());
 	const emu::Scanout& s = const_cast<Emu*>(this)->link.scanout();
 	float px = x / k - kBezel, py = y / k - kBezel;
 	if (px < 0 || py < 0 || px > kScreenW || py > kScreenH || !s.width) return false;
@@ -509,7 +514,12 @@ int main(int argc, char** argv) {
 				break;
 			}
 		}
-		if (e.link.scanout().serial != e.drawn_serial) e.update_texture(), dirty = true;
+		bool fresh;
+		{
+			std::lock_guard<std::mutex> lock(e.link.scanout_mutex());
+			fresh = e.link.scanout().serial != e.drawn_serial;
+		}
+		if (fresh) e.update_texture(), dirty = true;
 		if (screenshot_requested) screenshot_requested = 0, e.screenshot();
 		bool drew = dirty;
 		if (dirty) e.draw(), dirty = false;

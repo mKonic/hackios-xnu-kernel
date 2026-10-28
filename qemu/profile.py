@@ -54,6 +54,7 @@ def main():
     p.add_argument('--thread')
     p.add_argument('-n', type=int, default=30)
     p.add_argument('--callers', help='the stacks the functions with this in their name were called from')
+    p.add_argument('--depth', type=int, default=0, help='with --callers: that many frames of each stack, so that they add up')
     a = p.parse_args()
     if not os.path.exists(dsc_symbols.TABLE):
         sys.exit(f'profile.py: no {dsc_symbols.TABLE}; qemu/dsc_symbols.py makes it')
@@ -113,7 +114,7 @@ def main():
         if a.callers:
             at = next((i for i, f in enumerate(chain) if a.callers in label(*f)), None)
             if at is not None:
-                chains[tuple(label(*f) for f in chain[at:])] += 1
+                chains[tuple(label(*f) for f in chain[at:at + a.depth if a.depth else None])] += 1
         selfs[label(*here)] += 1
         images[here[0]] += 1
         for function in set(chain):

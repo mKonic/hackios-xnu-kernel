@@ -20,6 +20,16 @@
 #                          (it hands out an address by DHCP, answers DNS and passes connections on to
 #                          this machine's network; no privileges needed). The kernel makes en0 of it
 #                          (boot-arg virtio_net=1, added here); see userland/src/net_test.m for the rest.
+#      QEMU_HOSTFWD=<rule>  an inbound forward on that network, e.g. tcp::8022-:22 (host 8022 -> guest 22;
+#                          userland/rc.jobs.ssh-qemu runs sshd). Without it the guest only connects out.
+#      QEMU_DNS=<addr>     the name server DHCP hands out instead of QEMU's own proxy (10.0.2.3), which is
+#                          one hop slower (seconds per lookup against a LAN resolver).
+#      QEMU_NET_TYPE=tap   a tap device made beforehand (QEMU_TAP_IF, default tap-hackios) on a bridge: the
+#                          guest gets an address from the bridge's DHCP and is reachable without forwards.
+#                            sudo ip tuntap add dev tap-hackios mode tap user $USER
+#                            sudo ip link set tap-hackios master virbr0; sudo ip link set tap-hackios up
+#      QEMU_NET_TYPE=passt QEMU's passt back end (QEMU_PASST_OPTS): unprivileged, shares the host's address,
+#                          nothing can connect in.
 #      AUDIO=<where>       what plays the sound of iOS: a QEMU audio back end (pipewire, pa, alsa, sdl: each
 #                          needs its QEMU module, e.g. the package qemu-audio-pipewire) or FILE.wav to
 #                          write it into a file instead. Default: nowhere (the guest plays all the same).
@@ -104,7 +114,12 @@ python3 -c 'import os, sys; os.path.getsize(sys.argv[1]) >= int(sys.argv[2]) or 
 	qemu/ram.img $FILE_SIZE || exit 1
 NET=()
 if [ -n "$QEMU_NET" ] && [ "$QEMU_NET" != 0 ]; then
-	NET=(-netdev user,id=net0 -device virtio-net-device,netdev=net0)
+	case "${QEMU_NET_TYPE:-user}" in
+	tap)   NETDEV="tap,id=net0,ifname=${QEMU_TAP_IF:-tap-hackios},script=no,downscript=no" ;;
+	passt) NETDEV="passt,id=net0${QEMU_PASST_OPTS:+,$QEMU_PASST_OPTS}" ;;
+	*)     NETDEV="user,id=net0${QEMU_HOSTFWD:+,hostfwd=$QEMU_HOSTFWD}${QEMU_DNS:+,dns=$QEMU_DNS}" ;;
+	esac
+	NET=(-netdev "$NETDEV" -device virtio-net-device,netdev=net0)
 	CMDLINE="virtio_net=1 $CMDLINE"
 fi
 # the sound device (QEMU 8.2 or newer has one for this machine): the kernel's sink for /dev/redwood-audio

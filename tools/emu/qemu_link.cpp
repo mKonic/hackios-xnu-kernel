@@ -90,6 +90,7 @@ struct ListenerCalls {
 	static void method(GDBusConnection*, const char*, const char*, const char*, const char* name, GVariant* args,
 	                   GDBusMethodInvocation* inv, gpointer self) {
 		Scanout& s = static_cast<QemuLink*>(self)->scanout_;
+		std::unique_lock<std::mutex> lock(static_cast<QemuLink*>(self)->scanout_mutex_);
 		std::string m = name;
 		static const bool debug = std::getenv("EMU_DEBUG");
 		if (debug) {
@@ -149,6 +150,7 @@ struct ListenerCalls {
 			// another resource (the guest's buffers in turn), and a blank there is a flicker each frame.
 			// A panel keeps its last picture too.
 		}
+				lock.unlock();
 				g_dbus_method_invocation_return_value(inv, nullptr);
 	}
 	static GVariant* property(GDBusConnection*, const char*, const char*, const char*, const char*, GError**, gpointer) {
@@ -158,11 +160,17 @@ struct ListenerCalls {
 };
 
 QemuLink::~QemuLink() {
+	if (listener_thread_.joinable()) {
+		stopping_ = true;
+		g_main_context_wakeup(listener_context_);
+		listener_thread_.join();
+	}
 	if (listener_ && listener_id_) g_dbus_connection_unregister_object(listener_, listener_id_);
 	if (listener_ && map_id_) g_dbus_connection_unregister_object(listener_, map_id_);
 	unmap(scanout_);
 	if (listener_) g_object_unref(listener_);
 	if (display_) g_object_unref(display_);
+	if (listener_context_) g_main_context_unref(listener_context_);
 	if (qmp_ >= 0) close(qmp_);
 }
 
@@ -243,6 +251,9 @@ bool QemuLink::connect(const std::string& qmp_path, int timeout_ms, std::string*
 	}
 	g_variant_unref(r);
 	if (!(listener_ = peer(lv[0], G_DBUS_CONNECTION_FLAGS_DELAY_MESSAGE_PROCESSING, error))) return false;
+	// The objects' calls are dispatched in the thread-default context of the thread that registers them.
+	listener_context_ = g_main_context_new();
+	g_main_context_push_thread_default(listener_context_);
 	GDBusNodeInfo* node = g_dbus_node_info_new_for_xml(kListenerXml, nullptr);
 	static const GDBusInterfaceVTable vtable{ListenerCalls::method, ListenerCalls::property, nullptr, {}};
 	listener_id_ = g_dbus_connection_register_object(listener_, "/org/qemu/Display1/Listener", node->interfaces[0], &vtable,
@@ -251,6 +262,7 @@ bool QemuLink::connect(const std::string& qmp_path, int timeout_ms, std::string*
 	if (!listener_id_) {
 		*error = std::string("register Listener: ") + err->message;
 		g_error_free(err);
+		g_main_context_pop_thread_default(listener_context_);
 		return false;
 	}
 	{
@@ -259,7 +271,11 @@ bool QemuLink::connect(const std::string& qmp_path, int timeout_ms, std::string*
 		                                            this, nullptr, nullptr);
 		g_dbus_node_info_unref(map_node);
 	}
+	g_main_context_pop_thread_default(listener_context_);
 	g_dbus_connection_start_message_processing(listener_);
+	listener_thread_ = std::thread([this] {
+		while (!stopping_) g_main_context_iteration(listener_context_, TRUE);
+	});
 	return true;
 }
 

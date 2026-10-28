@@ -1,0 +1,166 @@
+diff --git a/osfmk/conf/files.arm64 b/osfmk/conf/files.arm64
+index 1b7a1fc..1ab4ca5 100644
+--- a/osfmk/conf/files.arm64
++++ b/osfmk/conf/files.arm64
+@@ -109,3 +109,4 @@ osfmk/arm64/loader_return.c	optional nos_arm_asm
+ osfmk/arm64/user_exception_trace.c	standard
+ osfmk/arm64/gic_v3_irq.c	optional nos_arm_asm
+ osfmk/arm64/psci_smp.c	optional nos_arm_asm
++osfmk/arm64/redwood_native.c	optional nos_arm_asm
+diff --git a/osfmk/corecrypto/ccsha256_ltc_compress.c b/osfmk/corecrypto/ccsha256_ltc_compress.c
+index 162c289..c4c7167 100644
+--- a/osfmk/corecrypto/ccsha256_ltc_compress.c
++++ b/osfmk/corecrypto/ccsha256_ltc_compress.c
+@@ -78,6 +78,13 @@
+     d += t0;                                        \
+     h = t0 + t1;
+ 
++#if defined(__arm64__)
++/* redwood: by the host where our QEMU offers it (osfmk/arm64/redwood_native.c) */
++extern _Bool redwood_native_sha256(uint32_t state[8], size_t blocks, const void *data);
++extern int printf(const char *format, ...) __printflike(1, 2);
++extern int memcmp(const void *, const void *, size_t);
++#endif
++
+ // compress 512-bits
+ void
+ ccsha256_ltc_compress(ccdigest_state_t state, size_t nblocks, const void *in)
+@@ -88,6 +95,24 @@ ccsha256_ltc_compress(ccdigest_state_t state, size_t nblocks, const void *in)
+ 	uint32_t *s = ccdigest_u32(state);
+ 	const unsigned char *buf = in;
+ 
++#if defined(__arm64__)
++	/* (a call to the host costs about what a few blocks do here: the pages of code signing go) */
++	if (nblocks >= 8) {
++		static int checked;     /* the first one is done here as well, and the two compared */
++		uint32_t mine[8];
++
++		memcpy(mine, s, sizeof(mine));
++		if (redwood_native_sha256(s, nblocks, buf)) {
++			if (checked++ == 0) {
++				ccsha256_ltc_compress((ccdigest_state_t)mine, 7, buf);
++				ccsha256_ltc_compress((ccdigest_state_t)mine, nblocks - 7, buf + 7 * CCSHA256_BLOCK_SIZE);
++				printf("redwood: SHA-256 by the host %s the kernel's\n",
++				    memcmp(mine, s, sizeof(mine)) == 0 ? "matches" : "DOES NOT MATCH");
++			}
++			return;
++		}
++	}
++#endif
+ 	while (nblocks--) {
+ 		// schedule W 0..15
+ 		for (i = 0; i < 16; i += 1) {
+diff --git a/bsd/miscfs/apfs/apfs_lib.c b/bsd/miscfs/apfs/apfs_lib.c
+index db383dc..24248fe 100644
+--- a/bsd/miscfs/apfs/apfs_lib.c
++++ b/bsd/miscfs/apfs/apfs_lib.c
+@@ -3054,6 +3054,35 @@ apfs_inflate_fast(struct libdeflate_decompressor *d, const uint8_t *src, size_t
+ 		*out = n;
+ 		return 0;
+ 	}
++#if defined(__arm64__)
++	{
++		/* by the host where our QEMU offers it (osfmk/arm64/redwood_native.c) */
++		extern long redwood_native_inflate(void *dst, size_t dst_len, const void *src, size_t src_len);
++		static int checked;     /* the first one is done here as well, and the two compared */
++		long n = redwood_native_inflate(dst, dst_len, src, src_len);
++
++		if (n >= 0) {
++			if (checked++ == 0) {
++				uint8_t *mine = apfs_alloc(dst_len);
++				size_t got = 0;
++
++				if (mine != NULL) {
++					struct libdeflate_decompressor *dd = libdeflate_alloc_decompressor();
++
++					if (dd != NULL) {
++						(void)libdeflate_zlib_decompress(dd, src, src_len, mine, dst_len, &got);
++						libdeflate_free_decompressor(dd);
++					}
++					printf("redwood: inflate by the host %s the kernel's (%ld bytes)\n",
++					    got == (size_t)n && memcmp(mine, dst, got) == 0 ? "matches" : "DOES NOT MATCH", n);
++					apfs_free(mine, dst_len);
++				}
++			}
++			*out = (size_t)n;
++			return 0;
++		}
++	}
++#endif
+ 	if (d == NULL) {
+ 		own = libdeflate_alloc_decompressor();
+ 		if (own == NULL) {
+diff --git a/osfmk/arm64/redwood_native.c b/osfmk/arm64/redwood_native.c
+new file mode 100644
+index 0000000..5f52a62
+--- /dev/null
++++ b/osfmk/arm64/redwood_native.c
+@@ -0,0 +1,68 @@
++/*
++ * Native calls: bulk work the kernel hands to the host when it runs under our QEMU.
++ *
++ * Under QEMU's TCG every instruction of the kernel's own is emulated, ten times slower or more
++ * than the host would do the same work. For a few operations on buffers -- the SHA-256 of a
++ * code-signed page as it is faulted in, the zlib pieces of the system volume's compressed files
++ * -- our QEMU (target/arm/tcg/native-calls.c in the fork) does them itself when asked with an
++ * SMCCC call in the vendor-specific hypervisor range on the PSCI conduit. Whether it is there is
++ * asked once, with a call any other hypervisor or firmware answers NOT_SUPPORTED to; anything
++ * that does not answer as ours does, or a call that fails, leaves the work to the kernel's code.
++ */
++#include <stdint.h>
++#include <stdbool.h>
++#include <stddef.h>
++#include <kern/misc_protos.h>
++
++#define NATIVE_CALL_QUERY       0xc6000000ULL
++#define NATIVE_CALL_SHA256      0xc6000001ULL
++#define NATIVE_CALL_INFLATE     0xc6000002ULL
++#define NATIVE_CALL_MAGIC       0x5265647775644e43ULL      /* "RedwudNC" */
++
++extern uint32_t psci_smp_hvc;
++
++static int native_state;        /* 0: not asked yet; 1: there; -1: not */
++
++static uint64_t
++native_call(uint64_t fn, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4)
++{
++	register uint64_t x0 __asm__("x0") = fn;
++	register uint64_t x1 __asm__("x1") = a1;
++	register uint64_t x2 __asm__("x2") = a2;
++	register uint64_t x3 __asm__("x3") = a3;
++	register uint64_t x4 __asm__("x4") = a4;
++
++	__asm__ volatile ("hvc #0" : "+r" (x0), "+r" (x1), "+r" (x2), "+r" (x3), "+r" (x4) : : "memory");
++	return x0;
++}
++
++static bool
++redwood_native_available(void)
++{
++	if (native_state == 0) {
++		if (!psci_smp_hvc) {
++			return false;   /* no hypervisor's conduit, or not known yet: asked again later */
++		}
++		native_state = native_call(NATIVE_CALL_QUERY, 0, 0, 0, 0) == NATIVE_CALL_MAGIC ? 1 : -1;
++		printf("redwood: native calls %s\n", native_state > 0 ? "from the host (QEMU)" : "not offered");
++	}
++	return native_state > 0;
++}
++
++/* The SHA-256 compression function over `blocks` blocks of 64 bytes, by the host. */
++bool
++redwood_native_sha256(uint32_t state[8], size_t blocks, const void *data)
++{
++	return redwood_native_available() &&
++	       native_call(NATIVE_CALL_SHA256, (uintptr_t)state, (uintptr_t)data, blocks, 0) == 0;
++}
++
++/* A whole zlib stream inflated by the host: its length, or -1 (the kernel's own decoder then). */
++long
++redwood_native_inflate(void *dst, size_t dst_len, const void *src, size_t src_len)
++{
++	if (!redwood_native_available()) {
++		return -1;
++	}
++	return (long)native_call(NATIVE_CALL_INFLATE, (uintptr_t)dst, dst_len, (uintptr_t)src, src_len);
++}
