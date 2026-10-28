@@ -31,8 +31,14 @@ struct adreno8_hfi_mem_result {
 bool adreno8_hwsched_alloc(const struct adreno8_hfi_mem_request *request,
     struct adreno8_hfi_mem_result *result);
 
+/* Mode 4 closes allocations on transport/start failure and retains all pages. */
+void adreno8_hwsched_memory_failed(void);
+
 extern bool adreno8_hfi_tables_sent;
 bool adreno8_hfi_send(uint32_t id, const uint32_t *payload, uint32_t count, const char *what);
+/* Drain response/debug queues and stop allocations on transport or device faults. */
+bool adreno8_hfi_poll(void);
+void adreno8_hfi_worked(uint64_t *microseconds, uint32_t *count, uint32_t by[7]);
 
 /* Produce an ACK payload, including the echoed request header, in at most ten words. */
 bool adreno8_hwsched_request(const uint32_t *request, uint32_t words,

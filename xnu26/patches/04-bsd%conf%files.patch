@@ -1,0 +1,98 @@
+diff --git a/bsd/conf/files b/bsd/conf/files
+index 60d8aa6148d8..3c5247924e9d 100644
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -108,6 +108,62 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+ bsd/dev/unix_startup.c			standard
+ 
+ bsd/dev/monotonic.c         optional config_cpu_counters
++bsd/dev/redwood_input.c		standard
++bsd/dev/redwood_virtio_input.c	standard
++bsd/dev/redwood_goodix.c	standard
++bsd/dev/redwood_buttons.c	standard
++bsd/dev/redwood_battery.c	standard
++bsd/dev/redwood_ufs.c	standard
++bsd/dev/redwood_ufshc.c	standard
++bsd/dev/redwood_net.c		standard
++bsd/dev/redwood_virtio_net.c	standard
++bsd/dev/redwood_apple80211.c	standard
++bsd/dev/redwood_cpufreq.c	standard
++bsd/dev/redwood_adreno.c	standard
++bsd/dev/redwood_gpu_dispatch.c	standard
++bsd/dev/adreno8.c	standard
++bsd/dev/adreno8_cx.c	standard
++bsd/dev/adreno8_clock.c	standard
++bsd/dev/adreno8_rpmh.c	standard
++bsd/dev/adreno8_gmu.c	standard
++bsd/dev/adreno8_smmu.c	standard
++bsd/dev/adreno8_translation.c	standard
++bsd/dev/adreno8_hfi.c	standard
++bsd/dev/adreno8_memory.c	standard
++bsd/dev/adreno8_hwsched.c	standard
++bsd/dev/adreno8_gpu.c	standard
++bsd/dev/adreno8_context.c	standard
++bsd/dev/adreno8_bo.c	standard
++bsd/dev/adreno8_zap.c	standard
++bsd/dev/adreno8_secure.c	standard
++bsd/dev/redwood_audio.c		standard
++bsd/dev/redwood_virtio_sound.c	standard
++bsd/dev/redwood_speaker.c	standard
++bsd/dev/redwood_guard.c		standard
++bsd/dev/redwood_haptic.c		standard
++bsd/dev/annibale_haptic.c	standard
++bsd/dev/redwood_torch.c		standard
++bsd/dev/redwood_camera.c	standard
++bsd/dev/redwood_mic.c		standard
++bsd/dev/redwood_wifi.c		standard
++bsd/dev/redwood_adsp.c		standard
++bsd/dev/redwood_image.c		standard
++bsd/dev/redwood_virtio_blk.c	standard
++bsd/dev/redwood_sparse.c	standard
++bsd/dev/redwood_apfs_check.c	optional apfs
++bsd/dev/redwood_apfs_check_walk.c	optional apfs
++bsd/dev/redwood_apfs_check_write.c	optional apfs
++bsd/dev/redwood_sound.c		standard
++bsd/dev/redwood_qmi.c		standard
++bsd/dev/redwood_wlfw.c		standard
++bsd/dev/redwood_lx.c		standard
++bsd/dev/redwood_sta.c		standard
++bsd/dev/annibale_torch.c		standard
++bsd/dev/mhi_pcie.c		standard
++bsd/dev/mhi_pcie_power.c	standard
++bsd/dev/annibale_battery.c		standard
++bsd/dev/annibale_cpufreq.c		standard
++bsd/dev/annibale_buttons.c		standard
+ 
+ bsd/libkern/crc32.c			standard
+ bsd/libkern/random.c			standard
+@@ -155,6 +211,14 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
+ bsd/miscfs/mockfs/mockfs_fsnode.c	optional mockfs
+ bsd/miscfs/mockfs/mockfs_vfsops.c	optional mockfs
+ bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
++bsd/miscfs/apfs/apfs_deflate.c		optional apfs
++bsd/miscfs/apfs/apfs_zbitmap.c		optional apfs
++bsd/miscfs/apfs/apfs_lib.c		optional apfs
++bsd/miscfs/apfs/apfs_write.c		optional apfs
++bsd/miscfs/apfs/apfs_store.c		optional apfs
++bsd/miscfs/apfs/apfs_vfsops.c		optional apfs
++bsd/miscfs/apfs/apfs_vnops.c		optional apfs
++bsd/miscfs/ramfs/ramfs.c			optional ramfs
+ 
+ bsd/miscfs/routefs/routefs_ops.c	optional routefs
+ 
+@@ -380,6 +444,7 @@ bsd/security/audit/audit_syscalls.c		standard
+ bsd/security/audit/audit_worker.c		optional config_audit
+ 
+ bsd/pthread/pthread_shims.c		standard
++bsd/pthread/pthread_kext_static.c    standard
+ bsd/pthread/pthread_priority.c		standard
+ bsd/pthread/pthread_workqueue.c		standard
+ 
+@@ -403,6 +468,7 @@ bsd/kern/kern_debug.c			standard
+ bsd/kern/kern_symfile.c			standard
+ bsd/kern/kern_descrip.c			standard
+ bsd/kern/kern_guarded.c			standard
++bsd/kern/kern_minimac.c			optional config_macf
+ bsd/kern/kern_event.c			standard
+ bsd/kern/kern_control.c			optional networking bound-checks
+ bsd/kern/kern_exec.c			standard

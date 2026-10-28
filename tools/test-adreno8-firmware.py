@@ -38,21 +38,31 @@ source = r'''
 #define kernel_map 0
 typedef uintptr_t vm_offset_t;
 typedef size_t vm_size_t;
+typedef int kern_return_t;
 struct adreno8_gpu_block { const char *name; uint32_t address, size; vm_offset_t memory; };
 struct adreno8_block { const char *name; uint32_t phys, size; vm_offset_t base; };
 struct adreno8_gpu_block adreno8_gmu_demands[GMU_BLOCKS], adreno8_gmu_log, adreno8_gmu_hfi;
+struct adreno8_memory { uint32_t gmu_address; };
+static const struct adreno8_memory vrb = {0x6000a000};
+static const struct adreno8_memory *adreno8_gmu_vrb = &vrb;
 struct adreno8_block adreno8_gmu, adreno8_gpu, adreno8_rscc;
 struct { bool is_on; } adreno8_gmu_space;
-static unsigned adreno8_gmu_demand_count, adreno8_step, writes, allocations, failures;
+static unsigned adreno8_gmu_demand_count, adreno8_step, writes, allocations, failures, scm_calls, general11_writes;
+static bool adreno8_direct_ring;
 static bool adreno8_fw_loaded, adreno8_gmu_runs, adreno8_rsc_asleep_at_first, adreno8_rsc_woken_by_us;
 static bool fail_allocation, corrupt_readback, emulate_start = true, scm_ok = true;
-static bool adreno8_scm_gpu_init(void) { return scm_ok; }
+static bool adreno8_scm_gpu_init(void) { scm_calls++; return scm_ok; }
 static const uint8_t *adreno8_gmu_firmware;
 static uint32_t adreno8_gmu_firmware_size;
 static uint32_t registers[0x68000 / 4], gpu_registers[0x10000 / 4], rsc_registers[0x1000 / 4];
 static int kmem_alloc(int map, vm_offset_t *memory, vm_size_t size, int flags, int tag) {
     if (fail_allocation) return 1;
     *memory = (uintptr_t)calloc(1, size); allocations++; return *memory ? 0 : 1;
+}
+static int kmem_alloc_contig(int map, vm_offset_t *memory, vm_size_t size,
+    vm_offset_t mask, unsigned pnum_mask, unsigned pnum_end, int flags, int tag) {
+    assert(mask == PAGE_MASK && !pnum_mask && !pnum_end);
+    return kmem_alloc(map, memory, size, flags, tag);
 }
 static uint64_t kvtophys(vm_offset_t memory) { return memory; }
 static bool adreno8_cx_ready(void) { return true; }
@@ -61,13 +71,18 @@ static void adreno8_announce(const char *message) {}
 static void adreno8_settle(void) {}
 static void adreno8_to_memory(vm_offset_t start, vm_size_t size) {}
 static uint32_t adreno8_rd(vm_offset_t address) {
+    if (adreno8_direct_ring && address == adreno8_gmu.base + GMU_GENERAL_11)
+        assert(registers[GMU_CM3_SYSRESET / 4] & 1);
     uint32_t value = *(uint32_t *)address;
     return corrupt_readback && address == adreno8_gmu.base + GMU_ITCM ? value ^ 1 : value;
 }
 static void adreno8_wr(vm_offset_t address, uint32_t value) {
     *(uint32_t *)address = value; writes++;
-    if (emulate_start && address == adreno8_gmu.base + GMU_CM3_SYSRESET && value == 0)
-        registers[GMU_FW_INIT_RESULT / 4] = GMU_FW_STARTED;
+    if (address == adreno8_gmu.base + GMU_GENERAL_11) general11_writes++;
+    if (address == adreno8_gmu.base + GMU_CM3_SYSRESET && value == 0) {
+        assert(registers[GMU_GENERAL_10 / 4] == ((8u << 24) | (1u << 8)));
+        if (emulate_start) registers[GMU_FW_INIT_RESULT / 4] = GMU_FW_STARTED;
+    }
 }
 static void adreno8_put(struct adreno8_block *block, const char *name, uint32_t offset, uint32_t value) {
     adreno8_wr(block->base + offset, value);
@@ -155,7 +170,7 @@ int main(int argc, char **argv) {
     assert(!adreno8_step_gmu_start() && !adreno8_gmu_runs && writes == before);
     scm_ok = true;
     assert(adreno8_step_gmu_start() && adreno8_gmu_runs);
-    assert(registers[GMU_GENERAL_10 / 4] == 0x08000000 && registers[GMU_RPMH_POWER_STATE / 4] == 0xf);
+    assert(registers[GMU_GENERAL_10 / 4] == 0x08000100 && registers[GMU_RPMH_POWER_STATE / 4] == 0xf);
     assert(registers[GMU_AHB_FENCE_RANGE_0 / 4] == (1u << 31 | 0x32u << 18 | 0x8a0));
     assert(gpu_registers[GPU_GBIF_HALT / 4] == 8);
     assert(registers[GMU_MRC_GBIF_QOS / 4] == 0x33);
@@ -168,18 +183,39 @@ int main(int argc, char **argv) {
     assert(!adreno8_step_gmu_start() && !adreno8_gmu_runs);
     registers[GMU_RSCC_CONTROL_REQ / 4] = 0; rsc_registers[RSCC_SEQ_BUSY / 4] = 0; emulate_start = true;
     assert(adreno8_step_gmu_start() && !adreno8_rsc_woken_by_us && registers[GMU_RSCC_CONTROL_REQ / 4] == 0);
+    adreno8_gmu_runs = false; adreno8_rsc_asleep_at_first = false;
+    registers[GMU_CM3_SYSRESET / 4] = 1; adreno8_direct_ring = true; adreno8_gmu_vrb = NULL;
+    registers[GMU_GENERAL_11 / 4] = 0x6000a000;
+    before = writes; unsigned calls = scm_calls, vrb_writes = general11_writes;
+    assert(!adreno8_step_gmu_start() && !adreno8_gmu_runs && writes == before && scm_calls == calls);
+    registers[GMU_GENERAL_11 / 4] = 0; registers[GMU_CM3_SYSRESET / 4] = 0;
+    assert(!adreno8_step_gmu_start() && writes == before && scm_calls == calls);
+    registers[GMU_CM3_SYSRESET / 4] = 1;
+    assert(adreno8_step_gmu_start() && adreno8_gmu_runs && scm_calls == calls + 1);
+    assert(!registers[GMU_GENERAL_11 / 4] && general11_writes == vrb_writes);
+    assert(registers[GMU_AHB_FENCE_RANGE_0 / 4] == (1u << 31 | 0x32u << 18 | 0x8c0));
     release_memory(); free(image);
     puts("Firmware boundaries, allocation failures, readback failures and startup conditions: PASS");
 }
 '''
+mutations = {
+    "ordinary-general11-guard": source.replace('if (adreno8_direct_ring && adreno8_get(&adreno8_gmu, "ordinary HFI GENERAL11", GMU_GENERAL_11) != 0)', 'if (false)'),
+    "ordinary-general11-write": source.replace('/* gen8_gmu_register_config; BCL remains disabled. */', 'if (adreno8_direct_ring) adreno8_put(&adreno8_gmu, "write GENERAL11", GMU_GENERAL_11, 0);'),
+    "ordinary-fence-range": source.replace('adreno8_direct_ring ? 0x8c0u : 0x8a0u', 'adreno8_direct_ring ? 0x8a0u : 0x8a0u'),
+    "ordinary-vrb-prerequisite": source.replace('(!adreno8_direct_ring && !adreno8_gmu_vrb)', '!adreno8_gmu_vrb'),
+}
 with tempfile.TemporaryDirectory(prefix="adreno8-firmware-") as directory:
     src = Path(directory) / "check.c"
-    src.write_text(source)
-    for page_size in (4096, 16384):
-        binary = Path(directory) / f"check-{page_size}"
-        subprocess.run(["cc", "-std=c11", f"-DPAGE_SIZE={page_size}u", "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-I", str(ROOT / "xnu/files/bsd/dev"), str(src), "-o", str(binary)], check=True)
-        result = subprocess.run([str(binary), str(args.firmware.resolve())], capture_output=True, text=True)
-        if result.returncode:
-            print(result.stdout, result.stderr)
-            result.check_returncode()
-        print(f"XNU page size {page_size}: {result.stdout.splitlines()[-1]}")
+    for label, body in {"baseline": source, **mutations}.items():
+        assert label == "baseline" or body != source, label
+        src.write_text(body)
+        for page_size in (4096, 16384):
+            binary = Path(directory) / f"check-{page_size}"
+            subprocess.run(["cc", "-std=c11", f"-DPAGE_SIZE={page_size}u", "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-I", str(ROOT / "xnu/files/bsd/dev"), str(src), "-o", str(binary)], check=True)
+            result = subprocess.run([str(binary), str(args.firmware.resolve())], capture_output=True, text=True)
+            if label == "baseline":
+                assert result.returncode == 0, result.stdout + result.stderr
+                print(f"XNU page size {page_size}: {result.stdout.splitlines()[-1]}")
+            else:
+                assert result.returncode != 0, f"undetected mutation: {label}, page={page_size}"
+    print(f"Ordinary GMU mutations rejected: {len(mutations)} x 2 page sizes")

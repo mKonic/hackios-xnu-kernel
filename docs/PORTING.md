@@ -29,7 +29,7 @@ shim from your Mu-Silicium tree (`mkxnuimg.py` does it when `Mu-Silicium/` is th
 
 ## 2. The loader
 
-`xnuloader/loader.c` describes each device with a `struct platform` and picks it by the framebuffer base the UEFI
+`xnuloader/platform_private.h` describes each device with a `struct platform` and picks it by the framebuffer base the UEFI
 reports. Paste `common/devices/<codename>.platform.c` next to `platform_redwood` and add it to `platforms[]`:
 
 | Field | Where it comes from |

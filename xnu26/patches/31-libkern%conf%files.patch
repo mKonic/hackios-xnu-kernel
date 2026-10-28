@@ -1,0 +1,13 @@
+diff --git a/libkern/conf/files b/libkern/conf/files
+index c4684c20a93f..b71a49f69192 100644
+--- a/libkern/conf/files
++++ b/libkern/conf/files
+@@ -110,6 +110,8 @@ libkern/img4/interface.c 		standard
+ libkern/image4/dlxk.c 		standard
+ 
+ libkern/amfi/amfi.c 		standard
++libkern/amfi/miniamfi.c 		standard
++libkern/amfi/miniamfi_entitlements.cpp 	standard
+ 
+ libkern/stack_protector.c       standard
+ libkern/ptrauth_utils.c         standard

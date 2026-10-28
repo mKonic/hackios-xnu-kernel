@@ -9,21 +9,41 @@ their hand-over (tl: s), the display driver's GPU wait and copy (tl: v), and eve
 for the GPU of a millisecond or more (tl: f). Every gesture -- from a touch going down, or a button,
 to the next one or 2.5 s later -- is a segment; for each:
 
-  frames a second while frames came; the share of frame-to-frame times (as the frames reached the
-  panel's memory) over 16.7 ms (counted from 18.0: a 60 Hz frame missed) and over 33 ms (from 34.5);
+  every frame-to-frame time of the segment (as the pixels reached the panel's memory), counted whole:
+  how many there are, their p50/p95/p99 and the longest of them, the frames a second over the span
+  between the segment's first and last frame shown (the touch to the first frame and the tail of the
+  window are outside that span), and the share over 18.0 ms and over 34.5 ms, experience thresholds
+  referenced to the 60 Hz frame period and its double;
+  of those times the ones under 100 ms, printed apart as a secondary statistic: their count and the
+  frames a second over the time they cover; the split at 100 ms reads nothing into the longer gaps;
   with boot-arg cpuload=MS (tl: u), how busy each processor core was meanwhile, in percent;
-  and for the frames over 16.7 ms, where the time between the previous frame and this one went:
+  and for the frames over 18.0 ms, where the time between the previous frame and this one went:
     draw      the window server drawing it (its first draw to its glFlush done: CPU, Mesa included)
     gpu       the GPU after the hand-over (SwapEnd to done)
     idle      the window server not drawing at all before it began (waiting for a commit, a fence, ...)
     copy      the display driver's copy into the panel's memory
+  the four are what the lines of those frames show: they cover part of a gap between frames, need not
+  add up to it and say no more about the panel than the times above do.
 
 The thresholds are as the coordinator asked for them; 18.0 rather than 16.7 because a frame of a steady
 60 comes 16.6 to 16.8 ms after the one before.
+
+Times are copy-completion timestamps: when a frame's pixels reached the panel's memory (the display
+driver's copy, tl: v done). The hardware scanout of that memory and the presentation of the picture
+are not measured here.
 """
 import sys
 
-OVER_ONE, OVER_TWO, SEGMENT_US = 18000, 34500, 2500000
+OVER_ONE, OVER_TWO, SEGMENT_US, UNDER_MAX = 18000, 34500, 2500000, 100000
+LABEL_ONE, LABEL_TWO = f'{OVER_ONE / 1000:.1f}', f'{OVER_TWO / 1000:.1f}'    # printed as the real thresholds
+
+
+def percentile(sorted_ms, p):
+    """The p-th percentile of times already sorted and in ms, by the nearest rank: the value in
+    position ceil(p * n / 100) of the sorted list, which is one of the measured times."""
+    if not sorted_ms:
+        return None
+    return sorted_ms[max(1, -(-p * len(sorted_ms) // 100)) - 1]
 
 
 def lines_of(paths):
@@ -40,6 +60,18 @@ def lines_of(paths):
                 seen.add(line)
                 out.append(line)
     return out
+
+
+def gap_stats(gaps_us):
+    """One phrase: how many frame-to-frame times, their p50/p95/p99 and the longest, in ms;
+    percentiles by nearest rank (see percentile)."""
+    ms = sorted(g / 1000 for g in gaps_us)
+    return (f'{len(ms)} steps; p50 {percentile(ms, 50):.1f}, p95 {percentile(ms, 95):.1f}, '
+            f'p99 {percentile(ms, 99):.1f}, max {ms[-1]:.1f} ms (nearest rank)')
+
+
+def over_share(gaps_us, threshold):
+    return 100 * sum(1 for g in gaps_us if g > threshold) / max(1, len(gaps_us))
 
 
 def main():
@@ -65,7 +97,7 @@ def main():
             pass
     gestures.sort()
     frames.sort(key=lambda f: f[1])
-    # every frame on the panel, with the drawing it came from
+    # every frame copied into the panel's memory, with the drawing it came from
     timeline = []
     for sid in sorted(shows):
         if sid not in swaps:
@@ -78,45 +110,53 @@ def main():
         ready, shown, done = shows[sid]
         timeline.append(dict(began=began, ended=ended, swap=swap, ready=ready, shown=shown, done=done))
     timeline.sort(key=lambda f: f['done'])
-    all_counts = [0, 0, 0]
+    all_gaps = []
     kinds, previous = {}, ''          # the same gesture done more than once: its frames together
-    print(f'frames.py: {len(gestures)} gestures, {len(timeline)} frames on the panel, {len(waits)} waits for the GPU '
+    print(f'frames.py: {len(gestures)} gestures, {len(timeline)} frames copied into the panel\'s memory, {len(waits)} waits for the GPU '
           f'of 1 ms or more')
+    if len(shows) > len(timeline):
+        print(f'  {len(shows) - len(timeline)} of the {len(shows)} frames the display driver reported are left out: '
+              f'their hand-over (tl: s) or their drawing (tl: g) is not in these logs')
+    print("  a frame's time is when the copy of its pixels into the panel's memory completed (tl: v "
+          'done); the hardware scanout and presentation are not measured')
     for i, (start, kind, button, x, y) in enumerate(gestures):
         end = min(gestures[i + 1][0] if i + 1 < len(gestures) else start + SEGMENT_US, start + SEGMENT_US)
         chosen = [f for f in timeline if start <= f['done'] < end]
+        gaps = [(b['done'] - a['done'], a, b) for a, b in zip(chosen, chosen[1:]) if b['done'] >= a['done']]
         what = f'button {button}' if kind == 4 else f'touch at {x / 655.35:.0f}%,{y / 655.35:.0f}%'
         key = f'{what} after {previous}' if kind == 4 else what
         previous = what
-        if len(chosen) < 3:
+        if not gaps:
             print(f'{i + 1:2}. {start / 1e6:9.3f} s {what}: {len(chosen)} frames')
             continue
-        gaps = [(b['done'] - a['done'], a, b) for a, b in zip(chosen, chosen[1:])]
-        moving = [g for g in gaps if g[0] < 100000]             # (a pause is the end of the movement, not a slow frame)
-        span = sum(g[0] for g in moving)
-        over1 = [g for g in moving if g[0] > OVER_ONE]
-        over2 = [g for g in moving if g[0] > OVER_TWO]
-        all_counts[0] += len(moving)
-        all_counts[1] += len(over1)
-        all_counts[2] += len(over2)
-        k = kinds.setdefault(key, [0, 0, 0, 0, 0])
+        values = [g[0] for g in gaps]
+        whole = sum(values)          # the span from the first to the last frame shown: the window edges are outside it
+        under = [g for g in gaps if g[0] < UNDER_MAX]    # secondary split at 100 ms only; no claim about the longer gaps
+        span = sum(g[0] for g in under)
+        over1 = [g for g in gaps if g[0] > OVER_ONE]
+        over2 = [g for g in gaps if g[0] > OVER_TWO]
+        all_gaps += values
+        k = kinds.setdefault(key, [0, []])
         k[0] += 1
-        k[1] += len(moving)
-        k[2] += span
-        k[3] += len(over1)
-        k[4] += len(over2)
-        fps = len(moving) * 1e6 / span if span else 0
-        line = (f'{i + 1:2}. {start / 1e6:9.3f} s {what}: {len(moving)} frames at {fps:4.1f} a second; '
-                f'over 16.7 ms {100 * len(over1) / max(1, len(moving)):3.0f}%, over 33 ms {100 * len(over2) / max(1, len(moving)):3.0f}%')
+        k[1] += values
+        line = (f'{i + 1:2}. {start / 1e6:9.3f} s {what}: ' + gap_stats(values) +
+                f'; {len(values) * 1e6 / whole if whole else 0:4.1f} a second; '
+                f'over {LABEL_ONE} ms {over_share(values, OVER_ONE):3.0f}%, '
+                f'over {LABEL_TWO} ms {over_share(values, OVER_TWO):3.0f}%')
+        if len(under) < len(gaps):
+            line += (f'; {len(gaps) - len(under)} of them {UNDER_MAX // 1000} ms or more; '
+                     f'intervals under {UNDER_MAX // 1000} ms: {len(under)}'
+                     + (f' at {len(under) * 1e6 / span:4.1f} a second' if span else ''))
         if over1:
             # where the slow frames' time went (means over them)
-            def mean(values):
-                return sum(values) / len(values) / 1000 if values else 0
+            def mean(values_ms):
+                return sum(values_ms) / len(values_ms) / 1000 if values_ms else 0
             draw = mean([b['ended'] - b['began'] for _, a, b in over1])
             gpu = mean([b['ready'] - b['swap'] for _, a, b in over1])
             idle = mean([b['began'] - a['ready'] for _, a, b in over1])
             copy = mean([b['done'] - b['shown'] for _, a, b in over1])
-            line += f'; the slow ones: draw {draw:4.1f}, gpu {gpu:4.1f}, idle before {idle:5.1f}, copy {copy:3.1f} ms'
+            line += (f'; the slow ones: draw {draw:4.1f}, gpu {gpu:4.1f}, idle before {idle:5.1f}, '
+                     f'copy {copy:3.1f} ms (what the lines of those frames show: no full split of the gap)')
             stalls = [w for w in waits if start <= w[0] < end]
             if stalls:
                 line += f'; {len(stalls)} waits for the GPU ({sum(w[2] for w in stalls) / 1000:.0f} ms)'
@@ -128,12 +168,20 @@ def main():
         print(line)
     if any(k[0] > 1 for k in kinds.values()):
         print('the same gestures together:')
-        for key, (times, steps, span, over1, over2) in kinds.items():
-            print(f'  {key:40} {times} times, {steps:4} frames at {steps * 1e6 / span if span else 0:4.1f} a second; '
-                  f'over 16.7 ms {100 * over1 / max(1, steps):3.0f}%, over 33 ms {100 * over2 / max(1, steps):3.0f}%')
-    if all_counts[0]:
-        print(f'all gestures: {all_counts[0]} frame steps, over 16.7 ms {100 * all_counts[1] / all_counts[0]:.0f}%, '
-              f'over 33 ms {100 * all_counts[2] / all_counts[0]:.0f}%')
+        for key, (times, values) in kinds.items():
+            whole = sum(values)
+            print(f'  {key:40} {times} times, ' + gap_stats(values) +
+                  f'; {len(values) * 1e6 / whole if whole else 0:4.1f} a second; '
+                  f'over {LABEL_ONE} ms {over_share(values, OVER_ONE):3.0f}%, '
+                  f'over {LABEL_TWO} ms {over_share(values, OVER_TWO):3.0f}%; '
+                  f'{sum(1 for g in values if g >= UNDER_MAX)} of them {UNDER_MAX // 1000} ms or more')
+    if all_gaps:
+        whole = sum(all_gaps)
+        print('all gestures: ' + gap_stats(all_gaps) +
+              f'; {len(all_gaps) * 1e6 / whole if whole else 0:4.1f} a second; '
+              f'over {LABEL_ONE} ms {over_share(all_gaps, OVER_ONE):.0f}%, '
+              f'over {LABEL_TWO} ms {over_share(all_gaps, OVER_TWO):.0f}%; '
+              f'{sum(1 for g in all_gaps if g >= UNDER_MAX)} of them {UNDER_MAX // 1000} ms or more')
 
 
 if __name__ == '__main__':

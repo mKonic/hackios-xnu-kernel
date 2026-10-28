@@ -75,6 +75,7 @@
 67-osfmk%kern%work_interval.h.patch
 68-pexpert%arm%pe_fiq.c.patch
 69-pexpert%arm%pe_kprintf.c.patch
+69a-pexpert%gen%device_tree.c.patch
 70-pexpert%pexpert%arm64%BCM2837.h.patch
 71-pexpert%pexpert%arm64%board_config.h.patch
 72-security%mac_vfs_subr.c.patch

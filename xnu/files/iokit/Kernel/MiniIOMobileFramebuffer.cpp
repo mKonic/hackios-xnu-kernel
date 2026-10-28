@@ -39,6 +39,8 @@ extern struct vc_info vinfo;            /* the boot framebuffer, as the text con
 #include <IOKit/IOBufferMemoryDescriptor.h>
 
 #include "MiniIOSurface.h"
+#include "MiniFramebufferScale.h"
+#include "MiniFramebufferSwap.h"
 
 extern "C" void redwood_tl(const char * format, ...) __printflike(1, 2);
 
@@ -66,17 +68,6 @@ enum {
 	kFBMethodGetProtectionOptions   = 82,
 };
 
-/* The swap request (IOMobileFramebufferSwapEnd): 0x46c bytes, of which we read these. */
-#define SWAP_SIZE               0x46c
-#define SWAP_ID                 0x50
-#define SWAP_SURFACE(layer)     (0x54 + 4 * (layer))    /* surface number, 0 = none */
-#define SWAP_SOURCE(layer)      (0x64 + 16 * (layer))   /* x, y, width, height in the surface */
-#define SWAP_ENABLED(layer)     (0xa4 + 4 * (layer))
-#define SWAP_DEST(layer)        (0xc4 + 16 * (layer))   /* x, y, width, height on the display */
-#define SWAP_LAYERS_SET         0x104                   /* bit per layer given in this swap */
-#define SWAP_LAYERS_CLEARED     0x108
-#define SWAP_LAYERS             4
-
 #define kFBNotifyVSync          5
 #define kFBNotifyTypes          8
 #define kFBRefreshHz            60                      /* unless boot-arg fb_hz says otherwise */
@@ -91,20 +82,16 @@ enum {
 static uint64_t gFBLogged[2];           /* selectors already reported */
 static uint8_t  gFBCalls[128];          /* how many calls of each selector were traced */
 
-/*
- * The display user space is told about. The system carries the identity of the iPhone X
- * (see the loader), and iOS knows what screen that phone has: with any other size
- * MobileGestalt reports an unknown screen class and the user interface has no layout for it.
- * So the display is always the iPhone's, and a swap scales the picture to the panel that is
- * really there (in QEMU the loader makes the panel exactly this size and nothing is scaled).
- * Boot-args fbwidth= and fbheight= change the size reported.
- */
+/* MobileGestalt needs a matching width, height and pixel density to select a screen class.
+ * Defaults retain the D22 display. fbwidth/fbheight/fbpitch select another profile;
+ * fbpitch=0 retains density scaling for the existing reduced-resolution modes. */
 #define kFBDefaultWidth         1125
 #define kFBDefaultHeight        2436
 #define kFBDotsPerInch          458
 
 static TUNABLE(uint32_t, gFBWidth, "fbwidth", kFBDefaultWidth);
 static TUNABLE(uint32_t, gFBHeight, "fbheight", kFBDefaultHeight);
+static TUNABLE(uint32_t, gFBPitch, "fbpitch", 0);
 /*
  * Boot-arg fbscale=2: the same 375 x 812 points drawn at two pixels a point instead of three.
  * Everything that is drawn is drawn by the processor, and this is 2.25 times fewer pixels to
@@ -564,18 +551,6 @@ IOMobileFramebuffer::defaultSurface(void)
 }
 
 /*
- * Two pixels mixed: `w` of 256 of the second. Two of the four channels at a time, in one word.
- */
-static inline uint32_t
-blend(uint32_t a, uint32_t b, uint32_t w)
-{
-	uint32_t rb = ((a & 0xff00ff) * (256 - w) + (b & 0xff00ff) * w) >> 8 & 0xff00ff;
-	uint32_t ga = ((a >> 8 & 0xff00ff) * (256 - w) + (b >> 8 & 0xff00ff) * w) & 0xff00ff00;
-
-	return rb | ga;
-}
-
-/*
  * Where the middle of the `i`th of `out` pixels falls among `in` of them, in 256ths of a pixel,
  * kept within the first and the last.
  */
@@ -632,13 +607,7 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
 				const uint32_t * lower = (const uint32_t *) (pixels + (size_t) (sy + row + 1) * stride) + sx;
 				uint32_t first = fColumn[cx0], last = fColumn[cx1 - 1] + 1 < (uint32_t) sw ? fColumn[cx1 - 1] + 1 : fColumn[cx1 - 1];
 
-				uint32_t * __restrict mixed = blendRow;
-
-				for (uint32_t c = first; c <= last; c++) {
-					uint32_t a = upper[c], b = lower[c];
-
-					mixed[c] = a == b ? a : blend(a, b, weight);           /* (most of a screen is the same as next to it) */
-				}
+				mixRows(upper, lower, blendRow, first, last, weight);
 				from = blendRow;
 			}
 		} else {
@@ -659,15 +628,7 @@ IOMobileFramebuffer::drawRows(const RowJob * job, int32_t y0, int32_t y1, uint32
 			}
 		}
 		if (filter) {
-			const uint32_t * __restrict column = fColumn + cx0;
-			const uint16_t * __restrict weights = fColumnWeight + cx0;
-			uint32_t * __restrict out = to + cx0;
-
-			for (uint32_t i = 0, n = (uint32_t) (cx1 - cx0); i < n; i++) {
-				uint32_t c = column[i], w = weights[i], a = from[c];
-
-				out[i] = w == 0 || a == from[c + 1] ? a : blend(a, from[c + 1], w);
-			}
+			scaleRow(from, to + cx0, fColumn + cx0, fColumnWeight + cx0, (uint32_t) (cx1 - cx0), (uint32_t) sw);
 		} else {
 			for (int32_t x = cx0; x < cx1; x++) {
 				to[x] = from[fColumn[x]];
@@ -1320,7 +1281,7 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 		if (args->scalarOutputCount < 1) {
 			return kIOReturnBadArgument;
 		}
-		out[0] = kFBDotsPerInch * fOwner->fWidth / kFBDefaultWidth;
+		out[0] = gFBPitch ? gFBPitch : kFBDotsPerInch * fOwner->fWidth / kFBDefaultWidth;
 		args->scalarOutputCount = 1;
 		return kIOReturnSuccess;
 
@@ -1344,13 +1305,15 @@ IOMobileFramebufferUserClient::externalMethod(uint32_t selector, IOExternalMetho
 		args->scalarOutputCount = 1;
 		return kIOReturnSuccess;
 
-	case kFBMethodSwapEnd:
-		if (args->structureInput == NULL || args->structureInputSize < SWAP_SIZE) {
-			IOLog("MiniIOMobileFramebuffer: swap request of %u bytes, expected %u\n", args->structureInputSize, SWAP_SIZE);
+	case kFBMethodSwapEnd: {
+		const uint8_t * swap = miniFramebufferSwapPayload(args->structureInput, args->structureInputSize);
+		if (swap == NULL) {
+			IOLog("MiniIOMobileFramebuffer: unsupported swap request of %u bytes\n", args->structureInputSize);
 			return kIOReturnBadArgument;
 		}
-		fOwner->present((const uint8_t *) args->structureInput);
+		fOwner->present(swap);
 		return kIOReturnSuccess;
+	}
 
 	case kFBMethodSwapWait:                         /* a swap is on the screen as soon as it is made */
 		if (gTouchLat) {

@@ -1,0 +1,14 @@
+diff --git a/osfmk/vm/vm_pageout.c b/osfmk/vm/vm_pageout.c
+index c082d1afcaa8..57d97025730a 100644
+--- a/osfmk/vm/vm_pageout.c
++++ b/osfmk/vm/vm_pageout.c
+@@ -5276,7 +5276,8 @@ vm_pressure_response()
+ 
+ 	available_memory = (uint64_t) memorystatus_get_available_page_count();
+ 
+-	total_pages = (unsigned int) atop_64(max_mem);
++	/* redwood: sane_size, as memstat_memory_size in bsd/kern/kern_memorystatus_internal.h */
++	total_pages = (unsigned int) atop_64(sane_size);
+ #if CONFIG_SECLUDED_MEMORY
+ 	total_pages -= vm_page_secluded_count;
+ #endif /* CONFIG_SECLUDED_MEMORY */

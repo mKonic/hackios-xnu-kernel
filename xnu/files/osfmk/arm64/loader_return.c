@@ -25,7 +25,14 @@
 #include <pexpert/pexpert.h>
 #include <pexpert/arm64/board_config.h>
 #include <vm/vm_page.h>
+/* (xnu-12377 declares it in no header; osfmk/kern/debug.c does the same) */
+extern int vsnprintf(char *, size_t, const char *, va_list);
+#if __has_include(<vm/vm_compressor_internal.h>)
+#include <vm/vm_compressor_internal.h>  /* xnu-12377: c_segment_pages_compressed */
+#define MEMSTAT_THRESHOLD_NAMES 1       /* ... and jetsam's thresholds have new names */
+#else
 #include <vm/vm_compressor.h>
+#endif
 
 extern int vsnprintf(char *, size_t, const char *, va_list);   /* (osfmk/kern/printf.c; no header has it) */
 
@@ -555,8 +562,14 @@ static uint32_t hv_wdt_enabled;
 
 #define MEMORY_REPORT_BEATS     6               /* a line about memory every so many heartbeats */
 
+#if MEMSTAT_THRESHOLD_NAMES
+extern uint32_t memorystatus_available_pages, memstat_idle_threshold, memstat_critical_threshold;
+#define memorystatus_available_pages_critical           memstat_idle_threshold
+#define memorystatus_available_pages_critical_base      memstat_critical_threshold
+#else
 extern unsigned int memorystatus_available_pages, memorystatus_available_pages_critical,
     memorystatus_available_pages_critical_base;
+#endif
 extern uint32_t c_segment_pages_compressed;
 extern _Atomic uint64_t ramfs_pages_in_use;
 extern void MiniIOSurfaceUsage(uint32_t *count, uint64_t *bytes);

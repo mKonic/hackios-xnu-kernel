@@ -1,0 +1,44 @@
+diff --git a/osfmk/kern/debug.c b/osfmk/kern/debug.c
+index 48f9405cc9ba..a6dc7a5e4f95 100644
+--- a/osfmk/kern/debug.c
++++ b/osfmk/kern/debug.c
+@@ -1244,7 +1244,7 @@ panic_with_thread_context(unsigned int reason, void *ctx, uint64_t debugger_opti
+ 	va_end(panic_str_args);
+ }
+ #endif /* defined (__x86_64__) */
+-
++extern void loader_panic_log(const char *, va_list *, unsigned long);
+ #pragma clang diagnostic push
+ #pragma clang diagnostic ignored "-Wmissing-noreturn"
+ __mockable void
+@@ -1252,7 +1252,7 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+     uint64_t panic_options_mask, void *panic_data_ptr, unsigned long panic_caller, const char *panic_initiator)
+ {
+ #pragma clang diagnostic pop
+-
++	loader_panic_log(panic_format_str, panic_args, panic_caller);
+ #if defined(__x86_64__) && (DEVELOPMENT || DEBUG)
+ 	read_lbr();
+ #endif
+@@ -1366,10 +1366,13 @@ panic_trap_to_debugger(const char *panic_format_str, va_list *panic_args, unsign
+ 	__builtin_unreachable();
+ }
+ 
++extern void loader_return(void);
++
+ /* We rely on this symbol being visible in the debugger for triage automation */
+ void __attribute__((noinline, optnone))
+ panic_spin_forever(void)
+ {
++	loader_return();
+ 	for (;;) {
+ #if defined(__arm__) || defined(__arm64__)
+ 		/* On arm32, which doesn't have a WFE timeout, this may not return.  But that should be OK on this path. */
+@@ -1390,6 +1393,7 @@ panic_stackshot_release_lock(void)
+ static void
+ kdp_machine_reboot_type(unsigned int type, uint64_t debugger_flags)
+ {
++	loader_return();
+ 	if ((type == kPEPanicRestartCPU) && (debugger_flags & DEBUGGER_OPTION_SKIP_PANICEND_CALLOUTS)) {
+ 		PEHaltRestart(kPEPanicRestartCPUNoCallouts);
+ 	} else {

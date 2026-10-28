@@ -1,0 +1,402 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 2467b24045cd..5aceb70e242e 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -1919,6 +1919,9 @@ SYSCTL_PROC(_vm, OID_AUTO, shared_region_control,
+  *		activators should not be given the opportunity to attempt
+  *		to activate the image.
+  */
++/* Bring-up aid: with boot-arg systrace set, say which stage of an exec refused the image. */
++static TUNABLE(uint32_t, exec_trace, "systrace", 0);
++
+ static int
+ exec_mach_imgact(struct image_params *imgp)
+ {
+@@ -2076,6 +2079,9 @@ grade:
+ 	 * Actually load the image file we previously decided to load.
+ 	 */
+ 	lret = load_machfile(imgp, mach_header, thread, &map, &load_result);
++	if (lret != LOAD_SUCCESS && exec_trace) {
++		printf("exectrace: %s: load_machfile failed: %d\n", imgp->ip_ndp->ni_cnd.cn_pnbuf, lret);
++	}
+ 	if (lret != LOAD_SUCCESS) {
+ 		error = load_return_to_errno(lret);
+ 
+@@ -2989,6 +2995,9 @@ exec_activate_image(struct image_params *imgp)
+ 
+ again:
+ 	error = namei(ndp);
++	if (error && exec_trace) {
++		printf("exectrace: %s: namei failed: %d\n", excpath, error);
++	}
+ 	if (error) {
+ 		if (error == ERESTART) {
+ 			error = EINTR;
+@@ -3018,6 +3027,9 @@ again:
+ 	}
+ 
+ 	error = exec_check_permissions(imgp);
++	if (error && exec_trace) {
++		printf("exectrace: %s: exec_check_permissions failed: %d\n", imgp->ip_ndp->ni_cnd.cn_pnbuf, error);
++	}
+ 	if (error) {
+ 		goto bad;
+ 	}
+@@ -3517,6 +3529,57 @@ exec_handle_exception_port_actions(const struct image_params *imgp,
+ }
+ 
+ 
++/*
++ * Bring-up aid, boot-arg applog=1: what applications and other programs started without a
++ * terminal say is worth reading here. Their standard output and error, which launchd opens on
++ * /dev/null, go to the console instead (that shows NSLog and the "Terminating app due to
++ * uncaught exception" kind of message). With applog=2 every program also gets
++ * OS_ACTIVITY_DT_MODE in its environment, which makes os_log write to standard error as well:
++ * everything any program logs, and a much slower system. applog_name=NAME[,NAME...] with
++ * applog=1 does that for the programs whose file names begin with one of the NAMEs only,
++ * which is how to read what one application extension has to say (launchd starts those for
++ * whoever asks, so there is no job description of ours to put the variable in).
++ */
++static TUNABLE(uint32_t, exec_applog, "applog", 0);
++static TUNABLE_STR(exec_applog_name, 128, "applog_name", "");
++
++static bool
++exec_applog_oslog(struct image_params *imgp)
++{
++	const char *name, *p = exec_applog_name;
++
++	if (exec_applog >= 2) {
++		return true;
++	}
++	if (exec_applog == 0 || *p == 0 || imgp->ip_ndp == NULL) {
++		return false;
++	}
++	name = imgp->ip_ndp->ni_cnd.cn_nameptr;
++	while (*p != 0) {
++		const char *word = p;
++
++		while (*p != 0 && *p != ',') {
++			p++;
++		}
++		if (p != word && (size_t)(p - word) <= imgp->ip_ndp->ni_cnd.cn_namelen && strncmp(word, name, (size_t)(p - word)) == 0) {
++			return true;
++		}
++		if (*p == ',') {
++			p++;
++		}
++	}
++	return false;
++}
++
++static const char *
++exec_applog_path(int fd, const char *path)
++{
++	if (exec_applog && (fd == 1 || fd == 2) && strcmp(path, "/dev/null") == 0) {
++		return "/dev/console";
++	}
++	return path;
++}
++
+ /*
+  * exec_handle_file_actions
+  *
+@@ -3587,7 +3650,7 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
+ 			AUDIT_SUBCALL_ENTER(OPEN, p, uthread);
+ 
+ 			NDINIT(ndp, LOOKUP, OP_OPEN, FOLLOW | AUDITVNPATH1, UIO_SYSSPACE,
+-			    CAST_USER_ADDR_T(psfa->psfaa_openargs.psfao_path),
++			    CAST_USER_ADDR_T(exec_applog_path(psfa->psfaa_filedes, psfa->psfaa_openargs.psfao_path)),
+ 			    imgp->ip_vfs_context);
+ 
+ 			error = open1(imgp->ip_vfs_context, ndp,
+@@ -3750,6 +3813,12 @@ exec_handle_file_actions(struct image_params *imgp, short psa_flags)
+ 
+ 		/* All file actions failures are considered fatal, per POSIX */
+ 
++		if (error && exec_trace) {
++			printf("exectrace: %s[%d]: file action %d on fd %d failed: %d (%s)\n", p->p_comm, proc_getpid(p),
++			    psfa->psfaa_type, psfa->psfaa_filedes, error,
++			    psfa->psfaa_type == PSFA_OPEN ? psfa->psfaa_openargs.psfao_path :
++			    psfa->psfaa_type == PSFA_CHDIR ? psfa->psfaa_chdirargs.psfac_path : "");
++		}
+ 		if (error) {
+ 			if (PSFA_OPEN == psfa->psfaa_type) {
+ 				DTRACE_PROC1(spawn__open__failure, uintptr_t,
+@@ -3968,12 +4037,17 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
+ {
+ 	int error = 0;
+ 	struct persona *persona = NULL;
+-	kauth_cred_t mycred = kauth_cred_get();
+-
+-	if (!IOCurrentTaskHasEntitlement( PERSONA_MGMT_ENTITLEMENT)) {
+-		return EPERM;
+-	}
+ 
++	/*
++	 * redwood: three of the four checks below cannot be passed in this port, and all stand in
++	 * the way of something ordinary. The entitlement is one nobody carries here (nothing is
++	 * signed, AMFI is a stub), and the persona is one nobody makes -- yet a package manager
++	 * becomes root by asking for exactly this: Sileo spawns apt and dpkg into persona 99 with
++	 * the uid it wants (its APTWrapper), from a process that is not root. Refused here, the
++	 * spawn failed before the program was ever started, and the application waited for an
++	 * answer that could not come. The check that still means something -- the size of the
++	 * group list -- stays; see spawn_persona_adopt() below for what happens then.
++	 */
+ 	if (px_persona->pspi_flags & POSIX_SPAWN_PERSONA_GROUPS) {
+ 		if (px_persona->pspi_ngroups > NGROUPS_MAX) {
+ 			return EINVAL;
+@@ -3981,17 +4055,9 @@ spawn_validate_persona(struct _posix_spawn_persona_info *px_persona)
+ 	}
+ 
+ 	persona = persona_lookup(px_persona->pspi_id);
+-	if (!persona) {
+-		return ESRCH;
++	if (persona) {
++		persona_put(persona);
+ 	}
+-
+-	// non-root process should not be allowed to set persona with uid/gid 0
+-	if (!kauth_cred_issuser(mycred) &&
+-	    (px_persona->pspi_uid == 0 || px_persona->pspi_gid == 0)) {
+-		error = EPERM;
+-	}
+-
+-	persona_put(persona);
+ 	return error;
+ }
+ 
+@@ -4038,7 +4104,38 @@ spawn_persona_adopt(proc_t p, struct _posix_spawn_persona_info *px_persona)
+ 	 */
+ 	persona = persona_lookup(px_persona->pspi_id);
+ 	if (!persona) {
+-		return ESRCH;
++		/*
++		 * redwood: there are no personas in this port -- nothing makes them, and
++		 * kpersona_find_by_type() answers "no such process" to everyone who asks. iOS's own
++		 * programs get along without them, but a package manager becomes root by way of one:
++		 * Sileo asks posix_spawn for persona 99 with OVERRIDE and uid 0 (its APTWrapper), and
++		 * that is how it runs apt and dpkg. With the persona missing the lookup failed, the
++		 * whole spawn failed with ESRCH, and the application sat for ever waiting for an
++		 * answer from a program that was never started. What the caller is after is the
++		 * credential, not the persona, so the credential is what it gets: the uid, gid and
++		 * groups it asked for, set on the process being spawned.
++		 *
++		 * And the count of processes per real uid follows, as proc_set_persona_internal() keeps
++		 * it: fork1() counted the new process under the parent's uid (mobile's), its exit takes
++		 * it off under the one it has then (root's). Without that, every program Sileo ran as
++		 * root took one away from root's count that had never been given, and the next process
++		 * of root's to exit once the count reached nothing panicked the kernel ("chgproccnt:
++		 * lost user").
++		 */
++		/* proc_ucred_unsafe() is OK because p is a fork/exec/... child */
++		uid_t old_ruid = kauth_cred_getruid(proc_ucred_unsafe(p));
++		uid_t new_ruid;
++
++		kauth_cred_proc_update(p, PROC_SETTOKEN_SETUGID,
++		    ^bool (kauth_cred_t parent __unused, kauth_cred_t model) {
++			return kauth_cred_model_setpersona(model, px_persona);
++		});
++		new_ruid = kauth_cred_getruid(proc_ucred_unsafe(p));
++		if (new_ruid != old_ruid) {
++			(void)chgproccnt(new_ruid, 1);
++			(void)chgproccnt(old_ruid, -1);
++		}
++		return 0;
+ 	}
+ 
+ 	return persona_proc_adopt(p, persona,
+@@ -4913,6 +5010,9 @@ do_fork1:
+ 		uthread->uu_ar = NULL;
+ #endif
+ 		error = exec_handle_port_actions(imgp, &port_actions);
++		if (error && exec_trace) {
++			printf("exectrace: exec_handle_port_actions failed: %d\n", error);
++		}
+ #if CONFIG_AUDIT
+ 		/* Restore the AUE_POSIX_SPAWN audit record. */
+ 		uthread->uu_ar = save_uu_ar;
+@@ -4954,6 +5054,9 @@ do_fork1:
+ 			}
+ 
+ 			error = spawn_posix_cred_adopt(p, imgp->ip_px_pcred_info);
++			if (error && exec_trace) {
++				printf("exectrace: spawn_posix_cred_adopt failed: %d\n", error);
++			}
+ 			if (error != 0) {
+ 				goto bad;
+ 			}
+@@ -4975,6 +5078,9 @@ do_fork1:
+ 			 * being executed.
+ 			 */
+ 			error = spawn_persona_adopt(p, imgp->ip_px_persona);
++			if (error && exec_trace) {
++				printf("exectrace: spawn_persona_adopt failed: %d\n", error);
++			}
+ 			if (error != 0) {
+ 				goto bad;
+ 			}
+@@ -5219,6 +5325,9 @@ bad_px_sa:
+ 	}
+ 
+ bad:
++	if (error && exec_trace) {
++		printf("exectrace: %s[%d]: posix_spawn failed: %d\n", p->p_comm, proc_getpid(p), error);
++	}
+ 
+ 	if (error == 0) {
+ 		/* reset delay idle sleep status if set */
+@@ -6724,10 +6833,75 @@ bad:
+  * Note:	The argument and environment vectors are user space pointers
+  *		to arrays of user space pointers.
+  */
++/*
++ * Bring-up aid: the sysctl kern.exec_inject holds "LIBRARY NAME NAME ..."; every program
++ * whose file name is one of the NAMEs is started with DYLD_INSERT_LIBRARIES=LIBRARY in its
++ * environment, so that dyld loads our library into it. Several such groups may follow each
++ * other, separated by ";". A program named in more than one group gets every one of those
++ * libraries, joined with ":" in the one DYLD_INSERT_LIBRARIES, so SpringBoard can carry both
++ * our window-server library and the tweak loader. launchd refuses to pass DYLD_ variables
++ * from a job description, which is why the kernel adds this one. Set once by our init (from
++ * etc/inject.conf) before it hands over to launchd.
++ */
++static char exec_inject_conf[512];
++SYSCTL_STRING(_kern, OID_AUTO, exec_inject, CTLFLAG_RW | CTLFLAG_LOCKED, exec_inject_conf, sizeof(exec_inject_conf),
++    "LIBRARY NAME... [; LIBRARY NAME...]: programs started with the library inserted");
++
++static bool
++exec_inject_env(struct image_params *imgp, char *env, size_t size)
++{
++	const char *name, *p = exec_inject_conf;
++	size_t namelen, used;
++	bool any = false;
++
++	if (*p == 0 || imgp->ip_ndp == NULL) {
++		return false;
++	}
++	name = imgp->ip_ndp->ni_cnd.cn_nameptr;
++	namelen = imgp->ip_ndp->ni_cnd.cn_namelen;
++	used = strlcpy(env, "DYLD_INSERT_LIBRARIES=", size);
++	while (*p != 0) {
++		const char *library;
++		size_t liblen;
++		bool matched = false;
++
++		while (*p == ' ' || *p == ';') {
++			p++;
++		}
++		library = p;
++		while (*p != 0 && *p != ' ' && *p != ';') {
++			p++;
++		}
++		liblen = (size_t)(p - library);
++		while (*p == ' ') {
++			const char *word = ++p;
++
++			while (*p != 0 && *p != ' ' && *p != ';') {
++				p++;
++			}
++			if (!matched && (size_t)(p - word) == namelen && namelen != 0 && liblen != 0 &&
++			    strncmp(word, name, namelen) == 0) {
++				matched = true;         /* this group names this program; its library is added once */
++			}
++		}
++		if (matched && liblen != 0 && used + 1 + liblen < size) {
++			if (any) {
++				env[used++] = ':';      /* dyld takes several libraries separated by ":" */
++			}
++			memcpy(env + used, library, liblen);
++			used += liblen;
++			env[used] = 0;
++			any = true;
++		}
++	}
++	return any;
++}
++
+ __attribute__((noinline))
+ static int
+ exec_extract_strings(struct image_params *imgp)
+ {
++	char            inject_env[512];
+ 	int error = 0;
+ 	int     ptr_size = (imgp->ip_flags & IMGPF_WAS_64BIT_ADDR) ? 8 : 4;
+ 	int new_ptr_size = (imgp->ip_flags & IMGPF_IS_64BIT_ADDR) ? 8 : 4;
+@@ -6897,6 +7071,33 @@ exec_extract_strings(struct image_params *imgp)
+ 		imgp->ip_envc++;
+ 	}
+ 
++	/* one more variable for the programs that get our library inside them (see exec_inject_env) */
++	if (exec_inject_env(imgp, inject_env, sizeof(inject_env))) {
++		error = exec_add_user_string(imgp, CAST_USER_ADDR_T(inject_env), UIO_SYSSPACE, TRUE);
++		if (error) {
++			goto bad;
++		}
++		if (imgp->ip_argspace < new_ptr_size) {
++			error = E2BIG;
++			goto bad;
++		}
++		imgp->ip_argspace -= new_ptr_size;
++		imgp->ip_envc++;
++	}
++	/* ... and one for everybody when the logs are wanted on the console (see exec_applog_path) */
++	if (exec_applog_oslog(imgp)) {
++		error = exec_add_user_string(imgp, CAST_USER_ADDR_T("OS_ACTIVITY_DT_MODE=YES"), UIO_SYSSPACE, TRUE);
++		if (error) {
++			goto bad;
++		}
++		if (imgp->ip_argspace < new_ptr_size) {
++			error = E2BIG;
++			goto bad;
++		}
++		imgp->ip_argspace -= new_ptr_size;
++		imgp->ip_envc++;
++	}
++
+ 	/* Save space for envv[] NULL terminator */
+ 	if (imgp->ip_argspace < new_ptr_size) {
+ 		error = E2BIG;
+@@ -7788,12 +7989,26 @@ handle_mac_transition:
+ 	/* Update the process' identity version and set the security token.
+ 	 * Also, ensure we always see a modified identity version (rdar://129775819).
+ 	 */
+-	int previous_pid_version = proc_get_ro(p)->p_idversion;
+-	int new_pid_version;
+-	do {
+-		new_pid_version = OSIncrementAtomic(&nextpidversion);
+-	} while (new_pid_version == previous_pid_version);
+-	proc_setpidversion(p, new_pid_version);
++	/*
++	 * (redwood) Except when xpcproxy becomes the service it was spawned for: then the process keeps
++	 * xpcproxy's identity version, as if launchd had spawned the service itself, which is what launchd
++	 * means by eliding xpcproxy ("service will attempt to elide xpcproxy"; here it spawns xpcproxy
++	 * all the same). RunningBoard keeps the audit token of such a process from before the exec and
++	 * never takes the newer one: every entitlement check it made for it failed (SecTaskLoadEntitlements
++	 * error 3, a thousand times a minute with Safari open), and Safari's web processes got no
++	 * assertions ("target is not running or doesn't have entitlement
++	 * com.apple.runningboard.assertions.webkit"). Boot-arg xpcproxy_idversion=1: a new version, as XNU.
++	 */
++	static TUNABLE(uint32_t, xpcproxy_idversion, "xpcproxy_idversion", 0);
++
++	if (xpcproxy_idversion || strncmp(p->p_comm, "xpcproxy", sizeof(p->p_comm)) != 0) {
++		int previous_pid_version = proc_get_ro(p)->p_idversion;
++		int new_pid_version;
++		do {
++			new_pid_version = OSIncrementAtomic(&nextpidversion);
++		} while (new_pid_version == previous_pid_version);
++		proc_setpidversion(p, new_pid_version);
++	}
+ 	task_set_uniqueid(proc_task(p));
+ 
+ 	/*
+@@ -8767,6 +8982,11 @@ process_signature(proc_t p, struct image_params *imgp)
+ 	}
+ 
+ done:
++	if (error && exec_trace) {
++		printf("exectrace: %s[%d]: process_signature failed: %d (csflags 0x%x, mac %d, cs_error %d)\n",
++		    p->p_comm, proc_getpid(p), error, imgp->ip_csflags, imgp->ip_mac_return,
++		    signature_failure_reason != OS_REASON_NULL);
++	}
+ 	if (0 == error) {
+ 		/*
+ 		 * Update the new process's signature-dependent process state.

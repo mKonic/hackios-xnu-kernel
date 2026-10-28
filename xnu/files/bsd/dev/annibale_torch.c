@@ -39,9 +39,13 @@
  *                  below; without it they bring it up themselves when first asked.
  *   torch_ma=M     the current of the test and of later light, 1 to 500 (the device tree's
  *                  torch0 max-current-ma, line 20946).
+ *   torch=3        instead of the test: the light for iOS until the run ends, through
+ *                  /dev/redwood-torch as on redwood (level 0 to 1000 of torch_ma), on for
+ *                  torch_max_s at a time at most (default 30, at most 120). With any torch=N the
+ *                  loader also tells iOS the camera has a flash, which Control Center's button needs.
  *
- * Two primitives are kept for the camera (task L1b: the dylib's FigFlashlight, which on redwood
- * is served through /dev/redwood-torch at level 0 to 1000): annibale_torch_low_on(mA) lights
+ * Two primitives are kept for a camera driver (task L1b; the dylib's FigFlashlight is served by
+ * torch=3 above): annibale_torch_low_on(mA) lights
  * channel 0 at up to the torch maximum and annibale_torch_low_off() puts it out; both fail
  * quietly once the module has said anything surprising. At the run's end (and on a panic's way
  * out) the light goes off.
@@ -56,10 +60,13 @@
 #include <libkern/libkern.h>
 #include <mach/mach_types.h>
 #include <machine/machine_routines.h>
+#include <miscfs/devfs/devfs.h>
 #include <pexpert/pexpert.h>
+#include <sys/conf.h>
 #include <sys/redwood_audio.h>
 #include <sys/redwood_input.h>
 #include <sys/systm.h>
+#include <sys/uio.h>
 
 extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern kern_return_t thread_terminate(thread_t thread);
@@ -78,7 +85,7 @@ static uint8_t timer_original;                  /* channel 0's safety timer as f
 #define ARB_CNFG_PHYS           0x0c42d000UL
 #define ARB_CNFG_SIZE           0x004000UL
 #define ARB_CHNLS_PHYS          0x0c500000UL
-#define ARB_CHNLS_SIZE          0x00010000UL
+#define ARB_CHANNEL_SIZE        0x1000UL                /* one write channel of the device tree's 4 MB "chnls" */
 #define ARB_OBSRV_PHYS          0x0c440000UL
 #define ARB_OBSRV_SIZE          0x0080000UL
 
@@ -103,11 +110,10 @@ static uint8_t timer_original;                  /* channel 0's safety timer as f
 #define CMD_REG(reg)            (((uint32_t)(reg) & 0xff) << 4)
 #define OPC_EXT_WRITEL          0
 #define OPC_EXT_READL           1
-#define OPC_EXT_WRITE           2
 #define OPC_EXT_READ            13
 #define TRANSACT_TIMEOUT_US     2000
 
-static vm_offset_t arb_core, arb_cnfg, arb_chnls, arb_obsrvr;
+static vm_offset_t arb_core, arb_cnfg, arb_obsrvr;
 
 /* the one peripheral: slave 1 function 0xee, the device tree's reg <0xee00 ...> */
 #define FLASH_PPID              0x1ee
@@ -117,6 +123,7 @@ static struct {
 	uint16_t        apid;
 	bool            found, exact, ours;       /* the entry, the device tree's ppid byte for byte, ours to write */
 	unsigned        owner;                    /* the system that may write through it */
+	vm_offset_t     channel;                  /* its write channel, mapped once it is known (channel 617 on this phone) */
 } flash;
 
 static int say(const char *format, ...) __printflike(1, 2);
@@ -234,11 +241,15 @@ spmi_write16(uint16_t addr, uint8_t value)
 	if (!flash.ours) {
 		return "the arbiter lets another system write the module";
 	}
+	if (flash.channel == 0) {
+		return "the module's write channel is not mapped";
+	}
 	nanoseconds_to_absolutetime(TRANSACT_TIMEOUT_US * (uint64_t)NSEC_PER_USEC, &interval);
-	channel = arb_chnls + 0x1000UL * flash.apid;
+	channel = flash.channel;
 	annibale_spmi_lock();
 	wr(channel + CH_WDATA0, value);
-	wr(channel + CH_CMD, CMD_OPC(OPC_EXT_WRITE) | CMD_REG(addr) | (1 - 1));
+	/* the 16-bit register address's write, as Linux's regmap-spmi-ext and redwood_torch.c send it */
+	wr(channel + CH_CMD, CMD_OPC(OPC_EXT_WRITEL) | CMD_REG(addr) | (1 - 1));
 	do {
 		status = rd(channel + CH_STATUS);
 		now = mach_absolute_time();
@@ -282,7 +293,12 @@ flash_put(uint16_t reg, uint8_t value)
 		return false;
 	}
 	if (back != value) {
-		say("torch: %#04x = %#04x read back %#04x\n", reg, value, back);
+		uint8_t later = back;
+
+		/* read once more after 1 ms to tell a slow register from one that refused */
+		wait_ms(1);
+		(void)spmi_read16(reg, &later, 1);
+		say("torch: %#04x = %#04x read back %#04x, %#04x 1 ms later\n", reg, value, back, later);
 		broken = true;
 		return false;
 	}
@@ -333,9 +349,8 @@ bring_up_locked(void)
 	    ARB_OBSRV_PHYS);
 	arb_core = ml_io_map(ARB_CORE_PHYS, ARB_CORE_SIZE);
 	arb_cnfg = ml_io_map(ARB_CNFG_PHYS, ARB_CNFG_SIZE);
-	arb_chnls = ml_io_map(ARB_CHNLS_PHYS, ARB_CHNLS_SIZE);
 	arb_obsrvr = ml_io_map(ARB_OBSRV_PHYS, ARB_OBSRV_SIZE);
-	if (arb_core == 0 || arb_cnfg == 0 || arb_chnls == 0 || arb_obsrvr == 0) {
+	if (arb_core == 0 || arb_cnfg == 0 || arb_obsrvr == 0) {
 		say("torch: the arbiter's windows cannot be mapped: no flashlight\n");
 		broken = true;
 		return false;
@@ -376,6 +391,13 @@ bring_up_locked(void)
 	}
 	if (!flash.found) {
 		say("torch: no channel of the arbiter is the flash module (slave 1, function %#x)\n", FLASH_FUNCTION);
+		broken = true;
+		return false;
+	}
+	/* (the whole 4 MB of write channels cannot be mapped this early in the boot: kmem_alloc fails) */
+	flash.channel = ml_io_map(ARB_CHNLS_PHYS + ARB_CHANNEL_SIZE * flash.apid, ARB_CHANNEL_SIZE);
+	if (flash.channel == 0) {
+		say("torch: the write channel %u cannot be mapped: nothing is written\n", flash.apid);
 		broken = true;
 		return false;
 	}
@@ -455,6 +477,15 @@ may_light(void)
  * vendor driver's own disable path clears that bit, and a torch is guarded in software on this
  * family (leds-qti-flash.c arms the timer for flashes only) -- and restored on the way out.
  */
+/* ITARGET's code for `ma': round(mA / 12.5) - 1 (redwood_torch.c), the smallest current at least */
+static unsigned
+itarget_code(uint32_t ma)
+{
+	unsigned code = (unsigned)((ma * 1000u + IRES_MA / 2) / IRES_MA);
+
+	return code == 0 ? 0 : code - 1;
+}
+
 static bool
 light_locked(uint32_t ma)
 {
@@ -498,11 +529,7 @@ light_locked(uint32_t ma)
 			return false;
 		}
 	}
-	code = (unsigned)((ma * 1000u + IRES_MA / 2) / IRES_MA);
-	if (code == 0) {
-		code = 1;                           /* the smallest current there is */
-	}
-	code--;                                   /* ITARGET code: round(mA / 12.5) - 1, redwood_torch.c */
+	code = itarget_code(ma);
 	if (!flash_put(FLASH_ITARGET, (uint8_t)code) || !flash_put(FLASH_ENABLE_CONTROL, 0x80)) {
 		(void)spmi_write16(FLASH_ITARGET, 0);
 		return false;
@@ -513,8 +540,19 @@ light_locked(uint32_t ma)
 		return false;
 	}
 	lit = true;
-	say("torch: channel 0 is lit at %u mA (itarget %#02x)\n", ma, code);
+	say("torch: channel 0 is lit at %u.%u mA (itarget %#02x, %u mA asked)\n", (code + 1) * IRES_MA / 1000,
+	    (code + 1) * IRES_MA % 1000 / 100, code, ma);
 	return true;
+}
+
+/* Another current for the light that is lit: ITARGET alone, as the vendor driver's torch brightness does. */
+static bool
+retarget_locked(uint32_t ma)
+{
+	if (broken || !lit) {
+		return false;
+	}
+	return flash_put(FLASH_ITARGET, (uint8_t)itarget_code(ma > TORCH_MAX_MA ? TORCH_MAX_MA : ma == 0 ? 1 : ma));
 }
 
 static void
@@ -543,6 +581,44 @@ dark_locked(void)
 
 /* ---- what the boot-arg asks ---------------------------------------------------------------------------- */
 
+/*
+ * The light's guard while it is lit, ten times a second: still lit (nobody else took the module),
+ * no fault in real time, the battery under the 45 C of Android's torch (redwood_torch.c; -273 while
+ * nothing knows). Anything else puts it out for the rest of the run. The caller holds torch_hv_lck.
+ */
+static bool
+watch_locked(void)
+{
+	uint8_t rt = 0, st[2];
+	int temperature;
+
+	if (!lit) {
+		say("torch: the light went out on its own: someone else owns the module\n");
+		broken = true;
+		return false;
+	}
+	if (spmi_read16(FLASH_INT_RT_STS, &rt, 1) != NULL) {
+		broken = true;
+		dark_locked();
+		return false;
+	}
+	if (rt & 0x01) {
+		(void)spmi_read16(FLASH_STATUS1, st, 2);
+		say("torch: the module raised a fault while lit (status1 %#02x, status2 %#02x): the light goes off "
+		    "and stays off\n", st[0], st[1]);
+		dark_locked();
+		broken = true;
+		return false;
+	}
+	if ((temperature = redwood_battery_temperature()) > 45) {
+		say("torch: the battery reads %d C, over Android's 45 C for the torch: the light goes off\n", temperature);
+		dark_locked();
+		broken = true;
+		return false;
+	}
+	return true;
+}
+
 static void
 torch_thread(__unused void *parameter, __unused wait_result_t result)
 {
@@ -566,38 +642,10 @@ torch_thread(__unused void *parameter, __unused wait_result_t result)
 	nanoseconds_to_absolutetime((uint64_t)secs * NSEC_PER_SEC, &interval);
 	until = mach_absolute_time() + interval;
 	while (mach_absolute_time() < until) {
-		uint8_t rt = 0, st[2];
-		int temperature;
-
 		wait_ms(100);
 		ticks++;
 		lck_mtx_lock(&torch_hv_lck);
-		if (!lit) {
-			say("torch: the light went out on its own: someone else owns the module\n");
-			broken = true;
-			lck_mtx_unlock(&torch_hv_lck);
-			goto done;
-		}
-		if (spmi_read16(FLASH_INT_RT_STS, &rt, 1) != NULL) {
-			broken = true;
-			dark_locked();
-			lck_mtx_unlock(&torch_hv_lck);
-			goto done;
-		}
-		if (rt & 0x01) {
-			(void)spmi_read16(FLASH_STATUS1, st, 2);
-			say("torch: the module raised a fault while lit (status1 %#02x, status2 %#02x): the light goes off "
-			    "and stays off\n", st[0], st[1]);
-			dark_locked();
-			broken = true;
-			lck_mtx_unlock(&torch_hv_lck);
-			goto done;
-		}
-		/* the battery's 45 C guard, as redwood_torch.c's; -273 while nothing knows */
-		if ((temperature = redwood_battery_temperature()) > 45) {
-			say("torch: the battery reads %d C, over Android's 45 C for the torch: the light goes off\n", temperature);
-			dark_locked();
-			broken = true;
+		if (!watch_locked()) {
 			lck_mtx_unlock(&torch_hv_lck);
 			goto done;
 		}
@@ -615,22 +663,136 @@ done:
 	thread_terminate(current_thread());
 }
 
+/*
+ * torch=3: the light for iOS, through redwood_torch.c's device and its contract, which
+ * libredwood-media.dylib in mediaserverd already speaks (userland/src/inject_media.c): a write of
+ * a 32-bit level, 0 to 1000 (thousandths of torch_ma; 0 off), a read of what is lit now. The
+ * device is made before mediaserverd opens it, at the thread's start. The light stays on for
+ * torch_max_s at most (default 30, at most 120) and then stays off until iOS asks for 0.
+ */
+static volatile uint32_t wanted;                /* the level asked for last */
+static uint32_t shown;                          /* the level lit now */
+static uint32_t max_secs = 30;
+
+static int
+torch_write(__unused dev_t dev, struct uio *uio, __unused int ioflag)
+{
+	uint32_t value;
+	int error;
+
+	while (uio_resid(uio) >= (user_ssize_t)sizeof(value)) {
+		if ((error = uiomove((caddr_t)&value, sizeof(value), uio)) != 0) {
+			return error;
+		}
+		wanted = value > 1000 ? 1000 : value;
+	}
+	return 0;
+}
+
+static int
+torch_read(__unused dev_t dev, struct uio *uio, __unused int ioflag)
+{
+	uint32_t value = shown;
+
+	return uiomove((caddr_t)&value, (int)MIN(sizeof(value), (size_t)uio_resid(uio)), uio);
+}
+
+static int
+torch_open(__unused dev_t dev, __unused int flags, __unused int type, __unused struct proc *p)
+{
+	return 0;
+}
+
+static const struct cdevsw torch_cdevsw = {
+	.d_open = torch_open, .d_close = torch_open, .d_read = torch_read, .d_write = torch_write,
+	.d_ioctl = eno_ioctl, .d_stop = eno_stop, .d_reset = eno_reset, .d_select = eno_select,
+	.d_mmap = eno_mmap, .d_strategy = eno_strat, .d_type = 0
+};
+
+static void
+serve_thread(__unused void *parameter, __unused wait_result_t result)
+{
+	uint64_t since = 0, limit;
+	uint32_t times = 0;
+	bool cut = false;                         /* put out at the limit: dark until iOS asks for 0 */
+	int major = cdevsw_add(-1, &torch_cdevsw);
+
+	if (major < 0 || devfs_make_node(makedev(major, 0), DEVFS_CHAR, UID_ROOT, GID_WHEEL, 0666, "redwood-torch") == NULL) {
+		say("torch: /dev/redwood-torch cannot be made\n");
+		goto done;
+	}
+	lck_mtx_lock(&torch_hv_lck);
+	if (!bring_up_locked()) {
+		lck_mtx_unlock(&torch_hv_lck);
+		goto done;
+	}
+	show_state("as found");
+	lck_mtx_unlock(&torch_hv_lck);
+	say("torch: the light is iOS's (/dev/redwood-torch): 1000 is %u mA, at most %u s at a time\n", milliamps, max_secs);
+	nanoseconds_to_absolutetime((uint64_t)max_secs * NSEC_PER_SEC, &limit);
+	while (!broken) {
+		uint32_t want = wanted, ma = (milliamps * want + 500) / 1000;
+
+		cut = cut && want != 0;
+		want = cut ? 0 : want;
+		lck_mtx_lock(&torch_hv_lck);
+		if (want != shown) {
+			bool ok = true;
+
+			if (want == 0) {
+				dark_locked();
+			} else if (shown == 0 && (ok = light_locked(ma))) {
+				since = mach_absolute_time();
+				times++;
+			} else if (shown != 0) {
+				ok = retarget_locked(ma);
+			}
+			shown = lit ? want : 0;
+			cut = cut || !ok;                 /* (a light refused stays dark until iOS asks for 0: no retrying every look) */
+			say("torch: iOS asks for %u of 1000: %s\n", wanted, shown ? "lit" : "dark");
+		}
+		if (lit && !watch_locked()) {
+			shown = 0;
+		} else if (lit && mach_absolute_time() - since > limit) {
+			say("torch: lit for %u s, the limit: off until iOS asks for 0\n", max_secs);
+			dark_locked();
+			shown = 0;
+			cut = true;
+		}
+		lck_mtx_unlock(&torch_hv_lck);
+		wait_ms(100);
+	}
+	lck_mtx_lock(&torch_hv_lck);
+	dark_locked();
+	shown = 0;
+	lck_mtx_unlock(&torch_hv_lck);
+	say("torch: the light for iOS stops after %u times lit: the module said something surprising\n", times);
+done:
+	thread_terminate(current_thread());
+}
+
 void
 annibale_torch_init(void)
 {
 	thread_t thread;
+	uint32_t mode = 0;
+	thread_continue_t body = torch_thread;
 
-	if (!PE_parse_boot_argn("torch_secs", &secs, sizeof(secs)) || secs == 0) {
-		return;
-	}
-	if (secs > 5) {
-		secs = 5;
-	}
+	PE_parse_boot_argn("torch", &mode, sizeof(mode));
 	PE_parse_boot_argn("torch_ma", &milliamps, sizeof(milliamps));
 	if (milliamps == 0 || milliamps > TORCH_MAX_MA) {
 		milliamps = 125;                  /* Android's torch current, as redwood's */
 	}
-	if (kernel_thread_start(torch_thread, NULL, &thread) == KERN_SUCCESS) {
+	if (mode == 3) {
+		PE_parse_boot_argn("torch_max_s", &max_secs, sizeof(max_secs));
+		max_secs = max_secs == 0 || max_secs > 120 ? 30 : max_secs;
+		body = serve_thread;
+	} else if (!PE_parse_boot_argn("torch_secs", &secs, sizeof(secs)) || secs == 0) {
+		return;
+	} else if (secs > 5) {
+		secs = 5;
+	}
+	if (kernel_thread_start(body, NULL, &thread) == KERN_SUCCESS) {
 		thread_deallocate(thread);
 	}
 }

@@ -1,0 +1,19 @@
+diff --git a/osfmk/arm/pmap/pmap.h b/osfmk/arm/pmap/pmap.h
+index f9e841f85710..8a7eb3345ab8 100644
+--- a/osfmk/arm/pmap/pmap.h
++++ b/osfmk/arm/pmap/pmap.h
+@@ -116,7 +116,13 @@
+  */
+ #define BOOTSTRAP_TABLE_SIZE (ARM_PGBYTES * 34)
+ #else /* defined(ARM_LARGE_MEMORY) */
+-#define BOOTSTRAP_TABLE_SIZE (ARM_PGBYTES * 8)
++/*
++ * With 4K pages every GB of DRAM costs one L2 page in each of the two
++ * bootstrap mappings (start.s maps all of memSize). Apple sized this for a
++ * 2 GB device (8 pages); 32 pages cover 14 GB, the most the loader gives
++ * (its payload entry "memsize"): iOS 26's system image is about 5 GB.
++ */
++#define BOOTSTRAP_TABLE_SIZE (ARM_PGBYTES * 32)
+ #endif /* defined(ARM_LARGE_MEMORY) */
+ 
+ typedef uint64_t tt_entry_t; /* translation table entry type */

@@ -23,7 +23,7 @@
  * drivers/spmi/spmi-pmic-arb.c and which bsd/dev/annibale_haptic.c first spoke to from here;
  * the windows and the channel arithmetic below are that file's.
  *
- * THIS DRIVER ONLY READS. Nothing is written to either chip, neither a register of a PMIC nor the
+ * The button polling path only reads. Nothing is written to either chip, neither a register of a PMIC nor the
  * configuration of the pin: the PMICs make the phone's supplies, and a wrong write there can
  * switch one off. The firmware reads the same keys itself (volume down and volume up choose
  * between fastboot and recovery under it as under redwood) and has left both inputs as they are
@@ -282,6 +282,8 @@ find_channel(struct peripheral *p, uint32_t channels)
 		printf("buttons: no channel of the arbiter is %s (slave %u, function %#x)\n", p->name, p->ppid >> 8, p->function);
 	}
 }
+
+#include "annibale_reboot_probe.inc"
 
 /* ---- the two peripherals ------------------------------------------------------------------------- */
 

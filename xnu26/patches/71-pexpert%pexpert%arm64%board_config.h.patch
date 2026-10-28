@@ -1,0 +1,20 @@
+diff --git a/pexpert/pexpert/arm64/board_config.h b/pexpert/pexpert/arm64/board_config.h
+index 5a6cd33683e4..4c435aeb89e5 100644
+--- a/pexpert/pexpert/arm64/board_config.h
++++ b/pexpert/pexpert/arm64/board_config.h
+@@ -302,6 +302,15 @@
+ 
+ 
+ 
++#ifdef ARM64_BOARD_CONFIG_BCM2837
++#include <pexpert/arm64/BCM2837.h>
++
++#define MAX_L2_CLINE                   6
++#define MAX_CPUS                       8 /* the Raspberry Pi has four; the boards this runs on now have up to eight */
++#define MAX_CPU_CLUSTERS               1
++
++#define CORE_NCTRS                     8 /* Placeholder; KPC is not enabled for this target */
++#endif  /* ARM64_BOARD_CONFIG_BCM2837 */
+ 
+ 
+ #ifdef ARM64_BOARD_CONFIG_VMAPPLE

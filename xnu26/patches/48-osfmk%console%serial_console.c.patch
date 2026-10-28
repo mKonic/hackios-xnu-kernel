@@ -1,0 +1,35 @@
+diff --git a/osfmk/console/serial_console.c b/osfmk/console/serial_console.c
+index 7784e72528e0..3c29e9834445 100644
+--- a/osfmk/console/serial_console.c
++++ b/osfmk/console/serial_console.c
+@@ -520,15 +520,20 @@ console_resume()
+  * @param str The string of characters to print.
+  * @param size The number of characters in `str` to print.
+  */
++/* Capture both buffered and panic output before console routing can suppress it. */
++extern void loader_log_putc(char c);
++
+ void
+ console_write(char *str, int size)
+ {
++	assert(str != NULL);
++	for (int n = 0; n < size; n++) {
++		loader_log_putc(str[n]);
++	}
+ 	if (disableConsoleOutput) {
+ 		return;
+ 	}
+ 
+-	assert(str != NULL);
+-
+ 	char *write_ptr = NULL;
+ 	int chunk_size = CPU_CONS_BUF_SIZE;
+ 	int i = 0;
+@@ -608,6 +613,7 @@ console_write(char *str, int size)
+ void
+ console_write_unbuffered(char c)
+ {
++	loader_log_putc(c);
+ 	if (disableConsoleOutput) {
+ 		return;
+ 	}

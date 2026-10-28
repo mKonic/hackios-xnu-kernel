@@ -1,0 +1,27 @@
+diff --git a/osfmk/ipc/mach_port.c b/osfmk/ipc/mach_port.c
+index 7ef6a22..c75bc1d 100644
+--- a/osfmk/ipc/mach_port.c
++++ b/osfmk/ipc/mach_port.c
+@@ -2970,10 +2970,6 @@ mach_port_is_connection_for_service(
+ 		return KERN_INVALID_ARGUMENT;
+ 	}
+ 
+-	if (!mach_msg_filter_at_least(MACH_MSG_FILTER_CALLBACKS_VERSION_1)) {
+-		return KERN_NOT_SUPPORTED;
+-	}
+-
+ 	ret = ipc_port_translate_receive(space, service_port_name, &service_port);
+ 	if (ret) {
+ 		return ret;
+@@ -2988,6 +2984,11 @@ mach_port_is_connection_for_service(
+ 	/* Port is locked and active */
+ 	service_port_sblabel = label.iol_service->ispl_sblabel;
+ 	if (service_port_sblabel) {
++		/* Service ports with sandbox labels require filter callbacks. */
++		if (!mach_msg_filter_at_least(MACH_MSG_FILTER_CALLBACKS_VERSION_1)) {
++			ip_mq_unlock_label_put(service_port, &label);
++			return KERN_NOT_SUPPORTED;
++		}
+ 		mach_msg_filter_retain_sblabel_callback(service_port_sblabel);
+ 	}
+ 	ip_mq_unlock_label_put(service_port, &label);

@@ -1,8 +1,8 @@
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 44274016a4cf..3b161c6e16e3 100644
+index 44274016a4cf..77ba1edc814a 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -109,6 +109,53 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
+@@ -109,6 +109,62 @@ bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
  
  bsd/dev/monotonic.c optional monotonic
@@ -18,15 +18,22 @@ index 44274016a4cf..3b161c6e16e3 100644
 +bsd/dev/redwood_apple80211.c	standard
 +bsd/dev/redwood_cpufreq.c	standard
 +bsd/dev/redwood_adreno.c	standard
++bsd/dev/redwood_gpu_dispatch.c	standard
 +bsd/dev/adreno8.c	standard
 +bsd/dev/adreno8_cx.c	standard
++bsd/dev/adreno8_clock.c	standard
++bsd/dev/adreno8_rpmh.c	standard
 +bsd/dev/adreno8_gmu.c	standard
 +bsd/dev/adreno8_smmu.c	standard
++bsd/dev/adreno8_translation.c	standard
 +bsd/dev/adreno8_hfi.c	standard
 +bsd/dev/adreno8_memory.c	standard
 +bsd/dev/adreno8_hwsched.c	standard
 +bsd/dev/adreno8_gpu.c	standard
++bsd/dev/adreno8_context.c	standard
++bsd/dev/adreno8_bo.c	standard
 +bsd/dev/adreno8_zap.c	standard
++bsd/dev/adreno8_secure.c	standard
 +bsd/dev/redwood_audio.c		standard
 +bsd/dev/redwood_virtio_sound.c	standard
 +bsd/dev/redwood_speaker.c	standard
@@ -51,12 +58,14 @@ index 44274016a4cf..3b161c6e16e3 100644
 +bsd/dev/redwood_sta.c		standard
 +bsd/dev/annibale_torch.c		standard
 +bsd/dev/mhi_pcie.c		standard
++bsd/dev/mhi_pcie_power.c	standard
 +bsd/dev/annibale_battery.c		standard
++bsd/dev/annibale_cpufreq.c		standard
 +bsd/dev/annibale_buttons.c		standard
  bsd/dev/dev_perfmon.c optional config_perfmon
  
  bsd/libkern/crc32.c			standard
-@@ -155,6 +202,14 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
+@@ -155,6 +211,14 @@ bsd/miscfs/devfs/devfs_vfsops.c		optional devfs
  bsd/miscfs/mockfs/mockfs_fsnode.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vfsops.c	optional mockfs
  bsd/miscfs/mockfs/mockfs_vnops.c	optional mockfs
@@ -71,7 +80,7 @@ index 44274016a4cf..3b161c6e16e3 100644
  
  bsd/miscfs/routefs/routefs_ops.c	optional routefs
  
-@@ -361,6 +416,7 @@ bsd/security/audit/audit_syscalls.c		standard
+@@ -361,6 +425,7 @@ bsd/security/audit/audit_syscalls.c		standard
  bsd/security/audit/audit_worker.c		optional config_audit
  
  bsd/pthread/pthread_shims.c		standard
@@ -79,7 +88,7 @@ index 44274016a4cf..3b161c6e16e3 100644
  bsd/pthread/pthread_priority.c		standard
  bsd/pthread/pthread_workqueue.c		standard
  
-@@ -383,6 +439,7 @@ bsd/kern/kern_debug.c			standard
+@@ -383,6 +448,7 @@ bsd/kern/kern_debug.c			standard
  bsd/kern/kern_symfile.c			standard
  bsd/kern/kern_descrip.c			standard
  bsd/kern/kern_guarded.c			standard

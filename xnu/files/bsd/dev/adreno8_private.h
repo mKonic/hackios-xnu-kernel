@@ -53,7 +53,7 @@ struct adreno8_bcm_db {
 };
 
 struct adreno8_gpu_level {
-	uint32_t hz, level;
+	uint32_t hz, level, bus;        /* bus: the stock table's qcom,bus-freq, a row of adreno8_bw_kb */
 };
 
 struct adreno8_bcm {
@@ -81,11 +81,17 @@ struct adreno8_gpu_space {
 	uint32_t context;
 	struct adreno8_space_table tables[1024];
 	unsigned table_count;
+	uint16_t leaf_slot[2048];                 /* each 2 MB's level-2 table, as its index in tables[] + 1; 0: not looked up yet */
+	unsigned secure_tables;           /* pages already assigned to {HLOS read/write, CP_PIXEL read} */
 	bool is_on;
 };
 
 #define GCC_DDRSS_GPU_AXI       0x71150         /* branch2_aon: memory clock (gcc-sm8750.c); its halt report is unreliable */
+#define GCC_GPU_GEMNOC_GFX      0x71010         /* gcc-sun.c: voted branch2_aon; GMU memnoc_clk */
 #define CBCR_ENABLE             (1u << 0)       /* a clock's control register: on */
+#define CBCR_HWCG               (1u << 1)
+#define CBCR_NOC_STATUS         (7u << 28)
+#define CBCR_NOC_ON             (2u << 28)
 #define CBCR_OFF                (1u << 31)      /* ... and whether it is in fact off */
 #define CMD_DB_PHYS             0x81c60000UL
 #define CMD_DB_SIZE             0x20000UL
@@ -166,6 +172,7 @@ struct adreno8_gpu_space {
 #define GMU_GENERAL_8           GMU(0x1f9c8)    /* where the GMU's log is, and its pages minus one */
 #define GMU_GENERAL_9           GMU(0x1f9c9)    /* ... and how far it has written */
 #define GMU_GENERAL_10          GMU(0x1f9ca)    /* which chip the firmware is told it runs on */
+#define GMU_GENERAL_11          GMU(0x1f9cb)    /* GMU VA of the virtual register bank */
 #define GMU_AO_INTERRUPT_CLR    GMU(0x23b04)
 #define GMU_AO_INTERRUPT_STATUS GMU(0x23b05)    /* bit 0 watchdog bit, bit 3 fence error, bit 5 bus error */
 #define GMU_AO_INTERRUPT_MASK   GMU(0x23b06)
@@ -178,6 +185,11 @@ struct adreno8_gpu_space {
 #define GMU_RBBM_INT_UNMASKED   GMU(0x23b15)
 #define GMU_BLOCKS              12
 #define GMU_BLOCK_CAP           0x01000000      /* a demand of up to 16M (the gen8 cache memory is 16M - 16K) */
+/* The SMMU uses 4 KiB granules independently of the XNU allocation page size.
+ * MP_ASSIGN shares the granule and physical-range rules, so they live here. */
+#define SMMU_GRANULE            4096u
+#define SMMU_GRANULE_MASK       (SMMU_GRANULE - 1)
+#define SMMU_PHYS_LIMIT         (1ULL << 36) /* TCR2.PASIZE = 1; IDR2 on SM8750 reports 36 bits. */
 #define SMMU_SCR0               0x000
 #define SMMU_IDR0               0x020           /* [7:0] stream match registers */
 #define SMMU_IDR1               0x024           /* bit 31: 64K pages, [30:28] log2(pages)-1, [7:0] translation contexts */
@@ -202,6 +214,8 @@ struct adreno8_gpu_space {
 #define SMMU_CB_TLBSYNC         0x7f0
 #define SMMU_CB_TLBSTATUS       0x7f4           /* bit 0: a sync is still on its way */
 #define SCTLR_ON                (1u | 2u | 4u | 32u) /* M, TRE, AFE and CFRE; faults are polled; ASIDPNE hint disabled */
+#define SCTLR_CFCFG             (1u << 7)       /* SMMUv2 context fault configuration: stall instead of terminate */
+#define SCTLR_M                 1u              /* CB SCTLR bit 0: stage-1 translation on; the secure preflight reads only this bit of context 3 */
 #define TCR_39_BITS             (25u | 1u << 8 | 1u << 10 | 3u << 12 | 1u << 23)     /* 39 bits, three levels (dt: qcom,use-3-lvl-tables) */
 #define TCR2_39_BITS            (1u | 1u << 4 | 7u << 15) /* 36-bit PA, 16-bit ASID, upstream separation */
 #define MAIR0_NORMAL            0xf404ff44
@@ -216,6 +230,9 @@ struct adreno8_gpu_space {
 #define GMU_STREAM              5
 #define GMU_MATCH               1
 #define GMU_CONTEXT             2              /* vendor reserves contexts 0 and 1 for GPU SID 0/1 */
+#define SECURE_CONTEXT          3              /* candidate for the gfx3d_secure SID 2 (vendor sun-gpu.dtsi); occupancy is re-checked by adreno8_secure_preflight before every secure handover; secure-world reservations of a context bank stay invisible to HLOS */
+#define SECURE_STREAM           2              /* gfx3d_secure stream id (vendor sun-gpu.dtsi, same SMMU as GMU SID 5) */
+#define SECURE_MATCH            2              /* candidate match slot: gfx3d_secure is the third stream-match entry in the vendor dtsi; a device scan confirms the slot the boot loader actually assigned */
 #define BCM_TCS_CMD(commit, valid, vote_x, vote_y) \
 	(((commit) ? 1u << 30 : 0u) | ((valid) ? 1u << 29 : 0u) | (((vote_x) & 0x3fffu) << 14) | ((vote_y) & 0x3fffu))
 #define BCM_COUNT               3                   /* the rows in adreno8_bcms: SH0, MC0, ACV */
@@ -223,7 +240,9 @@ struct adreno8_gpu_space {
 extern uint32_t adreno8_skip_steps;
 extern uint32_t adreno8_pause_ms;
 extern uint32_t adreno8_speed_asked;
+extern uint32_t adreno8_inflight;
 extern uint32_t adreno8_gmu_from_pll;
+extern bool adreno8_gpu_stall;
 extern uint32_t adreno8_step;
 extern uint32_t adreno8_newest_step;
 extern char adreno8_last_write[96];
@@ -255,15 +274,26 @@ extern struct adreno8_gpu_block adreno8_gmu_log;
 extern struct adreno8_gpu_block adreno8_gmu_hfi;
 extern bool adreno8_gmu_runs;
 extern bool adreno8_gmu_talks;
+extern bool adreno8_direct_ring;
+/* Cold diagnostic: START can be attempted once; HFI failure permanently clears ready. */
+bool adreno8_ordinary_start(void);
+bool adreno8_ordinary_ready(void);
 extern bool adreno8_fw_loaded;
 extern bool adreno8_rsc_woken_by_us;
 extern vm_offset_t adreno8_log_view[4];
 extern vm_offset_t adreno8_hfi_view_table, adreno8_hfi_view_cmd, adreno8_hfi_view_resp;
 extern vm_offset_t adreno8_hfi_view_debug;
 extern struct adreno8_gpu_space adreno8_gmu_space;
+extern struct adreno8_gpu_space adreno8_secure_space;
 extern bool adreno8_gpu8_keep;
 extern bool adreno8_reset_required;
 extern bool adreno8_gpu8_return;
+extern uint32_t adreno8_gpu8_secure_mode; /* boot-args adreno8_secure_preflight=N; unknown values parse to 0 */
+#define SECURE_MODE_OFF          0u
+#define SECURE_MODE_PREFLIGHT    1u            /* answer kind 5 with the read-only preflight only, no MP_ASSIGN and no reply */
+#define SECURE_MODE_HANDOVER     2u            /* isolated experiment: one handover of the kernel's own pages, terminal afterwards, no reply and no CB3 write */
+#define SECURE_MODE_TRANSLATION_A 3u           /* 3a: context 3 pointed at the handed-over tables and enabled, stream 2 route kept at fault, register read-backs and a clear FSR as the only proof this SMMU offers */
+#define SECURE_MODE_TRANSLATION_B 4u           /* 3b: enable the secure route, then reply to one kind-5 allocation */
 bool adreno8_memory_retained(void);
 
 int
@@ -322,6 +352,8 @@ bool
 adreno8_step_clocks(void);
 bool
 adreno8_scm_gpu_init(void);
+bool
+adreno8_scm_gpu_aperture(void);
 int32_t
 adreno8_scm_call(uint64_t function, uint64_t arginfo, uint64_t argument0,
     uint64_t argument1, uint64_t argument2, uint64_t argument3, uint64_t *answer);
@@ -349,6 +381,10 @@ bool
 adreno8_step_gmu_start(void);
 bool
 adreno8_step_smmu_read(void);
+void
+adreno8_smmu_cb_scan_ask(void);
+void
+adreno8_smmu_cb_scan_after_step9(void);
 vm_offset_t
 adreno8_space_new_table(struct adreno8_gpu_space *space, unsigned level, uint32_t index);
 bool
@@ -357,17 +393,37 @@ bool
 adreno8_space_map_block(struct adreno8_gpu_space *space, const struct adreno8_gpu_block *b);
 bool
 adreno8_space_on(struct adreno8_gpu_space *space, uint32_t stream, uint32_t match);
+bool
+adreno8_space_route(struct adreno8_gpu_space *space, uint32_t stream, uint32_t match);
+bool
+adreno8_space_route_check(struct adreno8_gpu_space *space, uint32_t stream, uint32_t match);
 void
 adreno8_space_off(struct adreno8_gpu_space *space, uint32_t match);
 bool
 adreno8_space_faulted(struct adreno8_gpu_space *space);
+bool
+adreno8_translation_walk(struct adreno8_gpu_space *space, uint32_t iova, vm_offset_t memory,
+    uint32_t size, uint32_t prot);
+bool
+adreno8_secure_translation_3a(struct adreno8_gpu_space *space);
+bool
+adreno8_secure_translation_3b(struct adreno8_gpu_space *space);
 bool
 adreno8_step_queues(void);
 bool
 adreno8_step_tables(void);
 bool
 adreno8_step_gx_power(void);
+void
+adreno8_speed_tick(void);
+extern uint64_t adreno8_retired_total;
+void
+adreno8_speed_state(uint32_t *mhz, uint32_t *changes);
 bool
 adreno8_step_last_look(void);
+bool
+adreno8_context_test(void);
+bool
+adreno8_step_service(void);
 
 #endif /* _DEV_ADRENO8_PRIVATE_H */

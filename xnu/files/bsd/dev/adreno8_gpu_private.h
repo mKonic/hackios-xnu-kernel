@@ -5,9 +5,15 @@
  * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  *
  * gen8_0_0 register definitions and tables from gen8_reg.h, adreno-gpulist.h
- * and adreno_gen8.c, copied without changing catalog values. Source:
+ * and adreno_gen8.c. Source:
  * https://github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750/tree/d50b305f7da9e14715a25120a4ac7b1a4b8b97c3/vendor/qcom/opensource/graphics-kernel
+ * TPL1_DBG_ECO_CNTL follows annibale msm_kgsl.ko, SHA-256
+ * 14aea73aa60814273a51f8e145e3b491471600466ddf6f42b7c45e1716b2bfd7:
+ * gen8_0_1 catalog +0xa8 selects gen8_0_0_nonctxt_regs[25],
+ * { register 0xb600, value 0x10000000, pipes 1 } (file offset 0x4f29c).
  * PM4 construction follows adreno_pm4types.h and gen8_cp_init_cmds.
+ * The ordinary ring sequence also follows Linux a8xx_gpu.c and a6xx_gpu.c:
+ * https://github.com/torvalds/linux/tree/efbda69d92e6a4822c5f2d09910f547872a9498d/drivers/gpu/drm/msm/adreno
  */
 #ifndef _DEV_ADRENO8_GPU_PRIVATE_H
 #define _DEV_ADRENO8_GPU_PRIVATE_H
@@ -21,6 +27,17 @@ struct a8_reg_pipes { uint32_t reg, pipes; };
 struct a8_protect_span { uint32_t reg, start, end, noaccess; };
 
 #define GEN8_CP_APERTURE_CNTL_HOST 0x81c
+#define GEN8_CP_RB_BASE_LO_GC 0x800
+#define GEN8_CP_RB_BASE_HI_GC 0x801
+#define GEN8_CP_RB_CNTL_GC 0x802
+#define GEN8_CP_RB_RPTR_ADDR_LO_BR 0x804
+#define GEN8_CP_RB_RPTR_ADDR_HI_BR 0x805
+#define GEN8_CP_RB_RPTR_BR 0x806
+#define GEN8_CP_RB_WPTR_GC 0x807
+#define GEN8_CP_RB_RPTR_ADDR_LO_BV 0x808
+#define GEN8_CP_RB_RPTR_ADDR_HI_BV 0x809
+#define GEN8_CP_RB_RPTR_BV 0x80a
+#define GEN8_CP_SQE_CNTL 0x815
 #define GEN8_CP_APRIV_CNTL_PIPE 0x84d
 #define GEN8_CP_AQE_INSTR_BASE_LO_0 0x818
 #define GEN8_CP_HW_FAULT_STATUS_MASK_PIPE 0x8b4
@@ -32,6 +49,23 @@ struct a8_protect_span { uint32_t reg, start, end, noaccess; };
 #define GEN8_CP_PROTECT_REG_PIPE 0x8a0
 #define GEN8_CP_SMMU_STREAM_ID_LPAC 0x814
 #define GEN8_CP_SQE_INSTR_BASE_LO 0x816
+/* Read-only CP/RBBM debug state; RBBM_MISC_STATUS bit0 is SMMU_STALLED_ON_FAULT (Mesa a6xx.xml A8XX). */
+#define GEN8_RBBM_STATUS1 0x013
+#define GEN8_RBBM_GFX_STATUS 0x015
+#define GEN8_RBBM_GFX_BR_STATUS 0x01a
+#define GEN8_RBBM_GFX_BV_STATUS 0x01c
+#define GEN8_RBBM_MISC_STATUS 0x01e
+#define GEN8_CP_CP2GMU_STATUS 0x822
+#define GEN8_CP_RL_ERROR_DETAILS_0 0x840
+#define GEN8_CP_RL_ERROR_DETAILS_1 0x841
+#define GEN8_CP_PROTECT_STATUS_PIPE 0x84f
+#define GEN8_CP_SQE_ICACHE_CNTL_PIPE 0x8b0
+#define GEN8_CP_HW_FAULT_STATUS_PIPE 0x8b3
+#define GEN8_CP_INTERRUPT_STATUS_PIPE 0x8b7
+#define GEN8_CP_PIPE_STATUS_PIPE 0x8b9
+#define GEN8_CP_SQE_STATUS_PIPE 0x8bb
+#define GEN8_CP_SQE_STAT_ADDR_PIPE 0x8f0
+#define GEN8_CP_SQE_STAT_DATA_PIPE 0x8f1
 #define GEN8_GMUAO_CGC_DELAY_CNTL 0x23b0a
 #define GEN8_GMUAO_CGC_HYST_CNTL 0x23b0b
 #define GEN8_GMUAO_CGC_MODE_CNTL 0x23b09
@@ -40,6 +74,9 @@ struct a8_protect_span { uint32_t reg, start, end, noaccess; };
 #define GEN8_GMUCX_POWER_COUNTER_ENABLE 0x1fc10
 #define GEN8_GMUCX_POWER_COUNTER_SELECT_XOCLK_0 0x1fc40
 #define GEN8_GMUCX_POWER_COUNTER_SELECT_XOCLK_1 0x1fc41
+#define GEN8_GBIF_CX_CONFIG 0x3c00
+#define GEN8_GBIF_HALT 0x3c45
+#define GEN8_GBIF_HALT_ACK 0x3c46
 #define GEN8_GRAS_DBG_ECO_CNTL 0x8702
 #define GEN8_GRAS_NC_MODE_CNTL 0x8700
 #define GEN8_GRAS_TSEFE_DBG_ECO_CNTL 0x8600
@@ -57,9 +94,12 @@ struct a8_protect_span { uint32_t reg, start, end, noaccess; };
 #define GEN8_RBBM_CGC_P2S_TRIG_CMD 0x09c
 #define GEN8_RBBM_CLOCK_CNTL_GLOBAL 0x09a
 #define GEN8_RBBM_GBIF_CLIENT_QOS_CNTL 0x008
+#define GEN8_RBBM_GBIF_HALT 0x00a
+#define GEN8_RBBM_GBIF_HALT_ACK 0x00b
 #define GEN8_RBBM_INTERFACE_HANG_INT_CNTL 0x02f
 #define GEN8_RBBM_INT_0_MASK 0x062
 #define GEN8_RBBM_INT_0_STATUS 0x06a
+#define GEN8_RBBM_STATUS 0x012
 #define GEN8_RBBM_NC_MODE_CNTL 0x440
 #define GEN8_RBBM_PERFCTR_GPU_BUSY_MASKED 0x19e
 #define GEN8_RBBM_SECVID_TSB_CNTL 0xf803
@@ -166,7 +206,7 @@ static const struct a8_reg_value a8_noncontext[] = {
 	{ GEN8_SP_CHICKEN_BITS_2, A8_BIT(22) | A8_BIT(23), A8_BIT(A8_PIPE_NONE) },
 	{ GEN8_SP_CHICKEN_BITS_3, 0x00300000, A8_BIT(A8_PIPE_NONE) },
 	{ GEN8_SP_HLSQ_TIMEOUT_THRESHOLD_DP, 0x00000080,  A8_BIT(A8_PIPE_NONE) },
-	{ GEN8_TPL1_DBG_ECO_CNTL, 0x10100000, A8_BIT(A8_PIPE_NONE) },
+	{ GEN8_TPL1_DBG_ECO_CNTL, 0x10000000, A8_BIT(A8_PIPE_NONE) },
 	{ GEN8_TPL1_DBG_ECO_CNTL1, 0x00000724, A8_BIT(A8_PIPE_NONE) },
 	{ GEN8_UCHE_MODE_CNTL, 0x00080000, A8_BIT(A8_PIPE_NONE) },
 	{ GEN8_UCHE_CCHE_MODE_CNTL, 0x00001000, A8_BIT(A8_PIPE_NONE) },

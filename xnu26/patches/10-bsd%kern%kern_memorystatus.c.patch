@@ -1,0 +1,99 @@
+diff --git a/bsd/kern/kern_memorystatus.c b/bsd/kern/kern_memorystatus.c
+index 6f8a417e10ae..9e4b95649696 100644
+--- a/bsd/kern/kern_memorystatus.c
++++ b/bsd/kern/kern_memorystatus.c
+@@ -1043,7 +1043,7 @@ __options_closed_decl(memorystatus_policy_t, uint8_t, {
+ 
+ static memorystatus_policy_t memstat_policy_config = kPolicyDefault;
+ 
+-#define MEMSTAT_PAGE_SHORTAGE_THRESHOLD_MAX ((uint32_t)(atop_64(max_mem) / 2))
++#define MEMSTAT_PAGE_SHORTAGE_THRESHOLD_MAX ((uint32_t)(atop_64(memstat_memory_size) / 2))
+ 
+ /*
+  * Jetsam Page Shortage Thresholds (PSTs):
+@@ -2054,7 +2054,7 @@ memorystatus_init(void)
+ 
+ 	memorystatus_sysproc_aging_aggr_pages = (unsigned int)MEMSTAT_PERCENT_TOTAL_PAGES(MEMORYSTATUS_AGGR_SYSPROC_AGING_PERCENTAGE);
+ 
+-	if (max_mem <= MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) {
++	if (memstat_memory_size <= MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) {
+ 		memorystatus_delta = (unsigned int)MEMSTAT_PERCENT_TOTAL_PAGES(MEMORYSTATUS_DELTA_PERCENTAGE_SMALL);
+ 	} else {
+ 		memorystatus_delta = (unsigned int)MEMSTAT_PERCENT_TOTAL_PAGES(MEMORYSTATUS_DELTA_PERCENTAGE_LARGE);
+@@ -2063,7 +2063,7 @@ memorystatus_init(void)
+ 	if (memorystatus_critical_threshold_mb != 0) {
+ 		memstat_critical_threshold = atop_32(memorystatus_critical_threshold_mb << 20);
+ 	} else {
+-		if (max_mem <= MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) {
++		if (memstat_memory_size <= MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) {
+ 			memstat_critical_threshold = MEMSTAT_PERCENT_TOTAL_PAGES(MEMORYSTATUS_CRITICAL_PERCENTAGE_SMALL);
+ 		} else {
+ 			memstat_critical_threshold = MEMSTAT_PERCENT_TOTAL_PAGES(MEMORYSTATUS_CRITICAL_PERCENTAGE_LARGE);
+@@ -2077,8 +2077,8 @@ memorystatus_init(void)
+ 		/*
+ 		 * For historical reasons, devices with "medium"-sized memory configs have a different critical:idle:pressure ratio
+ 		 */
+-		if ((max_mem > MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) &&
+-		    (max_mem <= MEMORYSTATUS_MEDIUM_MEMORY_THRESHOLD)) {
++		if ((memstat_memory_size > MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) &&
++		    (memstat_memory_size <= MEMORYSTATUS_MEDIUM_MEMORY_THRESHOLD)) {
+ 			memstat_idle_threshold = (MEMORYSTATUS_IDLE_RATIO_NUM_MEDIUM * memstat_critical_threshold) /
+ 			    MEMORYSTATUS_IDLE_RATIO_DENOM_MEDIUM;
+ 		} else {
+@@ -2091,8 +2091,8 @@ memorystatus_init(void)
+ 	if (memorystatus_pressure_threshold_mb != 0) {
+ 		memstat_soft_threshold = atop_32(memorystatus_pressure_threshold_mb << 20);
+ 	} else {
+-		if ((max_mem > MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) &&
+-		    (max_mem <= MEMORYSTATUS_MEDIUM_MEMORY_THRESHOLD)) {
++		if ((memstat_memory_size > MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) &&
++		    (memstat_memory_size <= MEMORYSTATUS_MEDIUM_MEMORY_THRESHOLD)) {
+ 			memstat_soft_threshold = (MEMORYSTATUS_PRESSURE_RATIO_NUM_MEDIUM * memstat_critical_threshold) /
+ 			    MEMORYSTATUS_PRESSURE_RATIO_DENOM_MEDIUM;
+ 		} else {
+@@ -2107,11 +2107,11 @@ memorystatus_init(void)
+ 	if (memorystatus_reaper_threshold_mb != 0) {
+ 		memstat_reaper_threshold = atop_32(memorystatus_reaper_threshold_mb << 20);
+ 	} else {
+-		if ((max_mem > MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) &&
+-		    (max_mem <= MEMORYSTATUS_MEDIUM_MEMORY_THRESHOLD)) {
++		if ((memstat_memory_size > MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) &&
++		    (memstat_memory_size <= MEMORYSTATUS_MEDIUM_MEMORY_THRESHOLD)) {
+ 			memstat_reaper_threshold = (MEMORYSTATUS_REAPER_RATIO_NUM_MEDIUM * memstat_critical_threshold) /
+ 			    MEMORYSTATUS_REAPER_RATIO_DENOM_MEDIUM;
+-		} else if (max_mem > MEMORYSTATUS_MEDIUM_MEMORY_THRESHOLD) {
++		} else if (memstat_memory_size > MEMORYSTATUS_MEDIUM_MEMORY_THRESHOLD) {
+ 			memstat_reaper_threshold = (MEMORYSTATUS_REAPER_RATIO_NUM_LARGE * memstat_critical_threshold) /
+ 			    MEMORYSTATUS_REAPER_RATIO_DENOM_LARGE;
+ 		} else {
+@@ -2124,8 +2124,8 @@ memorystatus_init(void)
+ 	if (memorystatus_reaper_minimum_age_seconds != MEMORYSTATUS_REAPER_SENTINAL_VALUE_MEANING_USE_DEFAULT) {
+ 		memstat_reaper_min_age_secs = memorystatus_reaper_minimum_age_seconds;
+ 	} else {
+-		if ((max_mem > MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) &&
+-		    (max_mem <= MEMORYSTATUS_MEDIUM_MEMORY_THRESHOLD)) {
++		if ((memstat_memory_size > MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) &&
++		    (memstat_memory_size <= MEMORYSTATUS_MEDIUM_MEMORY_THRESHOLD)) {
+ 			memstat_reaper_min_age_secs = MEMORYSTATUS_REAPER_MIN_AGE_SECS_DEFAULT_MEDIUM;
+ 		} else {
+ 			memstat_reaper_min_age_secs = MEMORYSTATUS_REAPER_MIN_AGE_SECS_DEFAULT;
+@@ -2135,8 +2135,8 @@ memorystatus_init(void)
+ 	if (memorystatus_reaper_minimum_age_apps_seconds != MEMORYSTATUS_REAPER_SENTINAL_VALUE_MEANING_USE_DEFAULT) {
+ 		memstat_reaper_min_age_apps_secs = memorystatus_reaper_minimum_age_apps_seconds;
+ 	} else {
+-		if ((max_mem > MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) &&
+-		    (max_mem <= MEMORYSTATUS_MEDIUM_MEMORY_THRESHOLD)) {
++		if ((memstat_memory_size > MEMORYSTATUS_SMALL_MEMORY_THRESHOLD) &&
++		    (memstat_memory_size <= MEMORYSTATUS_MEDIUM_MEMORY_THRESHOLD)) {
+ 			memstat_reaper_min_age_apps_secs = MEMORYSTATUS_REAPER_MIN_AGE_APPS_SECS_DEFAULT_MEDIUM;
+ 		} else {
+ 			memstat_reaper_min_age_apps_secs = MEMORYSTATUS_REAPER_MIN_AGE_APPS_SECS_DEFAULT;
+@@ -2207,7 +2207,7 @@ memorystatus_init(void)
+ 	} else {
+ 		memorystatus_freeze_threshold = (unsigned int)MEMSTAT_PERCENT_TOTAL_PAGES(MEMORYSTATUS_FREEZE_THRESHOLD_PERCENTAGE);
+ 	}
+-	assert(memorystatus_freeze_threshold < (unsigned int)atop_64(max_mem));
++	assert(memorystatus_freeze_threshold < (unsigned int)atop_64(memstat_memory_size));
+ 
+ 	if (memorystatus_swap_all_apps) {
+ 		/*

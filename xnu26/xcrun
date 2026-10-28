@@ -1,0 +1,19 @@
+#!/bin/bash
+# xcrun for xnu26/build-macos.sh (make's XCRUN). Xcode's xcrun does not take the SDK of
+# xnu-deps/26 by its path; for that one this answers the path itself and asks Xcode about the
+# iPhoneOS SDK it was copied from.
+args=() sdk=
+while [ $# -gt 0 ]; do
+	case "$1" in
+	-sdk | --sdk) sdk=$2; shift 2 ;;
+	-verbose) shift ;;
+	*) args+=("$1"); shift ;;
+	esac
+done
+if [ -n "$XNU26_SDK" ] && [ "$sdk" = "$XNU26_SDK" ]; then
+	case "${args[0]}" in
+	-show-sdk-path | --show-sdk-path) echo "$XNU26_SDK"; exit 0 ;;
+	esac
+	sdk=iphoneos
+fi
+exec /usr/bin/xcrun ${sdk:+-sdk "$sdk"} "${args[@]}"

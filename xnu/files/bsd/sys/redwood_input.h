@@ -42,6 +42,8 @@ void redwood_touch_post(uint32_t type, uint32_t finger, uint32_t x, uint32_t y);
 
 /* Block legacy register access unless the loader describes redwood or QEMU. */
 bool redwood_platform_blocks_legacy_drivers(void);
+/* The loader's GIC description of annibale, whose EPSS and RPMh blocks a redwood driver does drive. */
+bool redwood_platform_is_annibale(void);
 void redwood_input_init(void);
 void redwood_virtio_input_init(void);   /* boot-arg virtio_input=1: QEMU's virtio pointer and keyboard */
 void redwood_goodix_init(void);         /* boot-arg touchscreen=1: the phone's Goodix or FocalTech touch screen */
@@ -76,6 +78,10 @@ struct redwood_battery_state {
 void redwood_battery_report(const struct redwood_battery_state *state);
 void redwood_net_init(void);            /* en0, if there is something to carry its frames: sys/redwood_net.h */
 void redwood_cpufreq_init(void);        /* boot-arg cpufreq=1: the phone's processor at full speed */
+void annibale_cpufreq_init(void);       /* ... on annibale: cpufreq=1 a governor, 2 a report, 3 the ceiling (bsd/dev/annibale_cpufreq.c) */
+void annibale_cpufreq_touch(void);      /* a touch: the governor's boost */
+bool annibale_gpu_temperature(int32_t *tenths); /* the hottest GPU sensor; false without cpufreq=N or a valid reading */
+uint64_t annibale_cpufreq_touched(void);        /* mach_absolute_time() of the last touch, 0 for none */
 void redwood_adreno_init(void);         /* boot-arg adreno=N: the first N steps of waking the phone's GPU */
 void redwood_adreno_quiesce(void);      /* on the way back to the loader: the GPU block stopped, out of our memory */
 void redwood_adreno_stop(void);         /* before that, where the ending is no panic's: the GPU given back in order */
@@ -116,13 +122,16 @@ void redwood_gpu_space(uint64_t *used, uint32_t *live, uint64_t *largest, unsign
     uint64_t *lost, uint32_t *refused);
 extern uint32_t gpu_va;                 /* boot-arg gpu_va: 0 as before, 1 describe the addresses, 2 also guard them */
 bool redwood_gpu_map(uint64_t address, uint64_t phys, bool read_only);
-void redwood_gpu_mapped(void);
-void redwood_gpu_unmap(uint64_t address, uint64_t size);
+/* Commit prior map writes. Failure retains ownership of any entries already installed. */
+bool redwood_gpu_mapped(void);
+/* True only after all requested PTEs are removed and TLB synchronization completes. */
+bool redwood_gpu_unmap(uint64_t address, uint64_t size);
 void redwood_gpu_to_memory(void *start, uint64_t size);
 uint32_t redwood_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t count);
 bool redwood_gpu_done(uint32_t fence);
 uint32_t redwood_gpu_last(void);
 void redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t by[7]);
+void redwood_gpu_speed(uint32_t *mhz, uint32_t *changes);      /* the A830's speed and its changes; 0 and 0 elsewhere */
 void redwood_gpu_report(const char *why);
 bool redwood_gpu_recover(void);
 void redwood_gpu_stop(void);

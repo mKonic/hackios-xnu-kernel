@@ -14,9 +14,9 @@
  * the pages of the page cache that hold what was written are brought up to
  * date in place (ramfs_refresh_cache()).
  *
- * One mutex per mount guards all of it. It is never held while user memory
- * is touched (a fault there could come back to this filesystem as a
- * page-in): data moves through a bounce buffer instead.
+ * rm_lock protects mount data and is released before user memory accesses,
+ * which may fault back into ramfs. Copies use a bounce buffer. A separate
+ * rm_rename_lock serializes renames through their vnode identity updates.
  *
  * A node lives while it is named by a directory or has a vnode; after the
  * last unlink it is freed when its vnode is reclaimed.
@@ -110,6 +110,7 @@ struct ramfs_node {
 struct ramfs_mount {
 	mount_t             rm_mp;
 	lck_mtx_t           rm_lock;
+	lck_mtx_t           rm_rename_lock;
 	struct ramfs_node  *rm_root;
 	uint64_t            rm_next_ino;
 	uint64_t            rm_nodes;
@@ -847,91 +848,7 @@ ramfs_link(struct vnop_link_args *ap)
 	return error;
 }
 
-static int
-ramfs_rename(struct vnop_rename_args *ap)
-{
-	struct ramfs_node *fdir = RAMFS_NODE(ap->a_fdvp);
-	struct ramfs_node *tdir = RAMFS_NODE(ap->a_tdvp);
-	struct ramfs_node *node = RAMFS_NODE(ap->a_fvp);
-	struct ramfs_mount *rm = node->rn_mount;
-	struct componentname *fcnp = ap->a_fcnp, *tcnp = ap->a_tcnp;
-	struct ramfs_dirent *fde, *tde, *spare;
-	int error = 0;
-
-	if (tcnp->cn_namelen > RAMFS_MAX_NAME) {
-		return ENAMETOOLONG;
-	}
-	spare = ramfs_dirent_alloc(tcnp->cn_nameptr, (size_t)tcnp->cn_namelen);
-
-	lck_mtx_lock(&rm->rm_lock);
-	fde = ramfs_dir_find(fdir, fcnp->cn_nameptr, (size_t)fcnp->cn_namelen);
-	tde = ramfs_dir_find(tdir, tcnp->cn_nameptr, (size_t)tcnp->cn_namelen);
-
-	if (fde == NULL || fde->rd_node != node || tdir->rn_nlink == 0) {
-		error = ENOENT;
-		goto out;
-	}
-	if (node->rn_type == VDIR) {
-		/* a directory cannot move into itself or below itself */
-		for (struct ramfs_node *up = tdir; up != NULL; up = (up == rm->rm_root) ? NULL : up->rn_parent) {
-			if (up == node) {
-				error = EINVAL;
-				goto out;
-			}
-		}
-	}
-	if (tde != NULL && tde->rd_node == node) {
-		/* two names of the same file: POSIX wants the rename to do nothing */
-		goto out;
-	}
-
-	if (tde != NULL) {
-		struct ramfs_node *victim = tde->rd_node;
-
-		if (victim->rn_type == VDIR) {
-			if (node->rn_type != VDIR) {
-				error = EISDIR;
-			} else if (victim->rn_nentries != 0) {
-				error = ENOTEMPTY;
-			}
-		} else if (node->rn_type == VDIR) {
-			error = ENOTDIR;
-		}
-		if (error) {
-			goto out;
-		}
-		if (victim->rn_type == VDIR) {
-			victim->rn_nlink = 0;
-			victim->rn_parent = NULL;
-			tdir->rn_nlink--;
-		} else {
-			victim->rn_nlink--;
-			ramfs_touch(victim, false);
-		}
-		tde->rd_node = node;
-		ramfs_touch(tdir, true);
-	} else {
-		ramfs_dir_add(tdir, spare, node);
-		spare = NULL;
-	}
-	ramfs_dir_remove(fdir, fde);
-	if (node->rn_type == VDIR && fdir != tdir) {
-		fdir->rn_nlink--;
-		tdir->rn_nlink++;
-		node->rn_parent = tdir;
-	}
-	ramfs_touch(node, false);
-out:
-	lck_mtx_unlock(&rm->rm_lock);
-	if (spare != NULL) {
-		ramfs_dirent_free(spare);
-	}
-	if (!error) {
-		vnode_update_identity(ap->a_fvp, ap->a_tdvp, tcnp->cn_nameptr, tcnp->cn_namelen, tcnp->cn_hash,
-		    VNODE_UPDATE_PARENT | VNODE_UPDATE_NAME);
-	}
-	return error;
-}
+#include "ramfs_rename.inc"
 
 static int
 ramfs_open(__unused struct vnop_open_args *ap)
@@ -1685,6 +1602,7 @@ const struct vnodeopv_entry_desc ramfs_vnodeop_entries[] = {
 	{ .opve_op = &vnop_remove_desc, .opve_impl = (VOPFUNC)ramfs_remove },
 	{ .opve_op = &vnop_link_desc, .opve_impl = (VOPFUNC)ramfs_link },
 	{ .opve_op = &vnop_rename_desc, .opve_impl = (VOPFUNC)ramfs_rename },
+	{ .opve_op = &vnop_renamex_desc, .opve_impl = (VOPFUNC)ramfs_renamex },
 	{ .opve_op = &vnop_mkdir_desc, .opve_impl = (VOPFUNC)ramfs_mkdir },
 	{ .opve_op = &vnop_rmdir_desc, .opve_impl = (VOPFUNC)ramfs_rmdir },
 	{ .opve_op = &vnop_symlink_desc, .opve_impl = (VOPFUNC)ramfs_symlink },
@@ -1725,6 +1643,7 @@ ramfs_mount(mount_t mp, __unused vnode_t devvp, __unused user_addr_t data, __unu
 	}
 	rm = kalloc_type(struct ramfs_mount, Z_WAITOK | Z_ZERO | Z_NOFAIL);
 	lck_mtx_init(&rm->rm_lock, &ramfs_lck_grp, LCK_ATTR_NULL);
+	lck_mtx_init(&rm->rm_rename_lock, &ramfs_lck_grp, LCK_ATTR_NULL);
 	rm->rm_mp = mp;
 	rm->rm_next_ino = RAMFS_ROOT_INO + 1;
 	/* a runaway writer must not be able to take the whole machine: a quarter of memory at most */
@@ -1792,6 +1711,7 @@ ramfs_unmount(mount_t mp, int mntflags, __unused vfs_context_t ctx)
 	lck_mtx_unlock(&rm->rm_lock);
 
 	vfs_setfsprivate(mp, NULL);
+	lck_mtx_destroy(&rm->rm_rename_lock, &ramfs_lck_grp);
 	lck_mtx_destroy(&rm->rm_lock, &ramfs_lck_grp);
 	kfree_type(struct ramfs_node *, RAMFS_HASH_SIZE, rm->rm_hash);
 	kfree_type(struct ramfs_mount, rm);

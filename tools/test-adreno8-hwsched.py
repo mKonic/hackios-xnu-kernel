@@ -23,10 +23,12 @@ typedef uintptr_t vm_offset_t;
 struct block { vm_offset_t base; };
 static struct block adreno8_gmu;
 static uint32_t table[1024], commands[1024], responses[1024], debug[1024], regs[4];
+static bool adreno8_direct_ring;
 static vm_offset_t adreno8_hfi_view_table, adreno8_hfi_view_cmd;
 static vm_offset_t adreno8_hfi_view_resp, adreno8_hfi_view_debug;
 static bool adreno8_gmu_talks, adreno8_gpu8_keep, adreno8_gpu8_return, adreno8_reset_required;
-static bool cx_ready, allocation_ok;
+static bool cx_ready, allocation_ok, clock_ok;
+static unsigned clock_calls, memory_failures;
 static unsigned adreno8_step, mode, alloc_calls, result_fault, failure_snapshots, sleeps;
 static unsigned sent_count, fail_at, resource_replies;
 static uint32_t hwsched_ack_value;
@@ -41,11 +43,16 @@ enum { NORMAL, LEGACY, TIMEOUT, FW_ERROR, WRONG_QUEUE, BAD_VERSION, SHORT_ACK,
 #define GMU_FW_INIT_RESULT 12
 #define GMU_FW_FAILED 0xe00
 static int adreno8_say(const char *format, ...) { return 0; }
+static void adreno8_announce(const char *format, ...) { (void)format; }
 #define printf adreno8_say
 static bool adreno8_cx_ready(void) { return cx_ready; }
 static uint64_t mach_absolute_time(void) { return clock_ns; }
 static void absolutetime_to_nanoseconds(uint64_t value, uint64_t *out) { *out = value; }
 static void adreno8_settle(void) {}
+#define SECURE_MODE_TRANSLATION_B 4u
+static uint32_t adreno8_gpu8_secure_mode;
+static bool adreno8_gpu_faulted(void) { return false; }
+void adreno8_hwsched_memory_failed(void) { memory_failures++; }
 static void adreno8_gmu_post_mortem(void) { failure_snapshots++; }
 static uint32_t header(unsigned id, unsigned words, unsigned type, unsigned seq) {
     return id | (words << 8) | (type << 16) | (seq << 20);
@@ -57,8 +64,9 @@ static void append(unsigned queue, const uint32_t *msg, unsigned words) {
     h[11] = (h[11] + ((words + 3) & ~3u)) % 1024;
 }
 static void ack(uint32_t echoed, uint32_t status) {
-    uint32_t msg[] = {header(echoed & 0xff, 3, 1, 77), echoed, status};
-    append(1, msg, 3);
+    unsigned words = (echoed & 0xff) == 11 ? 4 : 3;
+    uint32_t msg[] = {header(echoed & 0xff, words, 1, 77), echoed, status, 0};
+    append(1, msg, words);
 }
 static void make_mem(uint32_t *out, unsigned version) {
     uint32_t msg[] = {header(20, version ? 11 : 10, 0, 99), version,
@@ -150,26 +158,36 @@ bool adreno8_hwsched_alloc(const struct adreno8_hfi_mem_request *request,
     }
     return true;
 }
-''' + transport + "\n" + protocol + r'''
+''' + transport + r'''
+static bool adreno8_clock_started(void) {
+    clock_calls++;
+    assert(sent_count >= 7 && (captured[6][0] & 0xff) == 10);
+    uint32_t *h = table + ADRENO8_HFI_HEADER(1);
+    assert(h[10] == h[11]); /* The START response has been consumed. */
+    return clock_ok;
+}
+''' + protocol + r'''
 #undef printf
 static void reset(unsigned next_mode) {
     memset(commands, 0, sizeof(commands)); memset(responses, 0, sizeof(responses));
     memset(debug, 0, sizeof(debug)); memset(regs, 0, sizeof(regs));
     memset(captured, 0, sizeof(captured)); memset(lengths, 0, sizeof(lengths));
-    adreno8_hfi_init_table(table, 0x60006000);
+    adreno8_hfi_init_table(table, 0x60006000, false);
     adreno8_hfi_view_table = (uintptr_t)table; adreno8_hfi_view_cmd = (uintptr_t)commands;
     adreno8_hfi_view_resp = (uintptr_t)responses; adreno8_hfi_view_debug = (uintptr_t)debug;
     adreno8_gmu.base = (uintptr_t)regs;
     adreno8_gmu_talks = adreno8_gpu8_keep = cx_ready = allocation_ok = adreno8_hfi_tables_sent = true;
+    adreno8_direct_ring = false;
     adreno8_hwsched_attempted = adreno8_hwsched_started = false;
     adreno8_gpu8_return = adreno8_reset_required = false;
+    clock_ok = true; clock_calls = memory_failures = 0;
     adreno8_hfi_seq = 4090;
     mode = next_mode; alloc_calls = result_fault = failure_snapshots = sleeps = 0;
     sent_count = fail_at = resource_replies = hwsched_ack_value = 0; clock_ns = 0;
 }
 static void check_boot(void) {
     assert(adreno8_hwsched_start() && adreno8_hwsched_ready());
-    assert(sent_count == 9 && resource_replies == 2 && alloc_calls == 1);
+    assert(sent_count == 9 && resource_replies == 2 && alloc_calls == 1 && clock_calls == 1);
     const uint32_t features[][3] = {{9,0,0},{1,1,0},{16,1,0}};
     for (unsigned i = 0; i < 3; i++) {
         assert((captured[i][0] & 0xff) == 11 && lengths[i] == 4);
@@ -192,6 +210,9 @@ static void check_boot(void) {
 }
 int main(void) {
     uint32_t msg[11], reply[10], reply_words;
+    reset(NORMAL); adreno8_direct_ring = true; adreno8_hwsched_started = true;
+    assert(!adreno8_hwsched_ready());
+    assert(!adreno8_hwsched_start() && !sent_count && !alloc_calls);
     reset(NORMAL); hwsched_ack_value = 7; check_boot();
     uint32_t pm4[10] = {0x70000000};
     assert(adreno8_hwsched_raw(pm4, 10, "CP init"));
@@ -209,12 +230,22 @@ int main(void) {
     assert(captured[7][4] == 0x1007 && captured[7][5] == 5 && captured[7][9] == 0x138000);
     reset(SECURE_MEM); result_fault = 11;
     assert(!adreno8_hwsched_start() && adreno8_reset_required && resource_replies == 0);
+    /* The secure request through the real HFI loop: a failed resource handler
+     * answers with nothing (7 pre-START messages, 0 replies), runs the
+     * postmortem once, and a repeated start attempt sends nothing new. */
+    assert(sent_count == 7 && failure_snapshots == 1);
     reset(SECURE_MEM); allocation_ok = false;
     assert(!adreno8_hwsched_start() && adreno8_reset_required && resource_replies == 0);
+    assert(sent_count == 7 && failure_snapshots == 1);
+    assert(!adreno8_hwsched_start() && sent_count == 7 && failure_snapshots == 1);
+    reset(NORMAL); clock_ok = false;
+    assert(!adreno8_hwsched_start() && !adreno8_hwsched_ready());
+    assert(clock_calls == 1 && adreno8_reset_required && memory_failures == 1);
+    assert(!adreno8_hwsched_start() && clock_calls == 1 && sent_count == 9);
     for (unsigned i = 1; i <= 7; i++) {
         reset(NORMAL); fail_at = i;
         assert(!adreno8_hwsched_start() && !adreno8_hwsched_ready());
-        assert(sent_count == i && adreno8_reset_required);
+        assert(sent_count == i && adreno8_reset_required && clock_calls == 0);
         if (i == 5) assert(captured[4][1] == 2); /* A failed PREEMPTION off stops before AQE/START. */
         assert(!adreno8_hwsched_start() && sent_count == i);
     }
@@ -301,8 +332,24 @@ int main(void) {
 
 with tempfile.TemporaryDirectory(prefix="adreno8-hwsched-") as directory:
     target = Path(directory)
-    (target / "check.c").write_text(source)
-    subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Wno-unused-parameter",
-                    "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-I", str(DEV),
-                    str(target / "check.c"), "-o", str(target / "check")], check=True)
-    subprocess.run([str(target / "check")], check=True)
+    clock_block = "\tif (!adreno8_clock_started()) {\n\t\tadreno8_hwsched_memory_failed();\n\t\treturn false;\n\t}\n"
+    assert source.count(clock_block) == 1
+    mutations = [
+        source.replace("return !adreno8_direct_ring && adreno8_hwsched_started", "return adreno8_hwsched_started"),
+        source.replace("if (adreno8_direct_ring || adreno8_hwsched_attempted", "if (adreno8_hwsched_attempted"),
+        source.replace(clock_block, ""),
+        source.replace("if (!adreno8_clock_started())", "if (!adreno8_clock_started() && false)"),
+        source.replace(clock_block, "").replace("\tif (!adreno8_hfi_send(14,", clock_block + "\tif (!adreno8_hfi_send(14,"),
+    ]
+    for index, text in enumerate([source] + mutations):
+        (target / "check.c").write_text(text)
+        subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Wno-unused-parameter",
+                        "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-I", str(DEV),
+                        str(target / "check.c"), "-o", str(target / "check")], check=True)
+        result = subprocess.run([str(target / "check")], capture_output=True, text=True)
+        if index == 0:
+            result.check_returncode()
+            print(result.stdout, end="")
+        else:
+            assert result.returncode != 0, index
+    print("HWSCHED ordinary-mode rejection and START clock transition: 5 mutations rejected: PASS")

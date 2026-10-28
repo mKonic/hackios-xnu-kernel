@@ -1,0 +1,82 @@
+diff --git a/osfmk/vm/vm_dyld_pager.c b/osfmk/vm/vm_dyld_pager.c
+index d3cd6e8fe9bc..3cc76ce4065b 100644
+--- a/osfmk/vm/vm_dyld_pager.c
++++ b/osfmk/vm/vm_dyld_pager.c
+@@ -65,6 +65,12 @@
+ #include <arm/misc_protos.h>
+ #endif /* defined(HAS_APPLE_PAC) */
+ 
++#if defined(HAS_APPLE_PAC) || defined(ARM64_BOARD_CONFIG_BCM2837)
++/* the arm64e pointer formats; BCM2837 runs arm64e user space without pointer authentication */
++#define DYLD_PAGER_ARM64E 1
++#include <ptrauth.h>
++#endif
++
+ 
+ /* For speculation macros */
+ #if __arm64__
+@@ -557,7 +563,7 @@ fixupPage32(
+ 	return KERN_SUCCESS;
+ }
+ 
+-#if defined(HAS_APPLE_PAC)
++#if DYLD_PAGER_ARM64E
+ /*
+  * Sign a pointer needed for fixups.
+  */
+@@ -577,19 +583,28 @@ signPointer(
+ 		return KERN_SUCCESS;
+ 	}
+ 
++#if defined(HAS_APPLE_PAC)
+ 	uint64_t extendedDiscriminator = diversity;
+ 	if (addrDiv) {
+ 		extendedDiscriminator = __builtin_ptrauth_blend_discriminator(loc, extendedDiscriminator);
+ 	}
++#else
++	(void)loc, (void)addrDiv, (void)diversity, (void)pager;
++#endif
+ 
+ 	switch (key) {
+ 	case ptrauth_key_asia:
+ 	case ptrauth_key_asda:
++#if defined(HAS_APPLE_PAC)
+ 		if (pager->dyld_a_key == 0 || arm_user_jop_disabled()) {
+ 			*signedAddr = unsignedAddr;
+ 		} else {
+ 			*signedAddr = (uintptr_t)pmap_sign_user_ptr((void *)unsignedAddr, key, extendedDiscriminator, pager->dyld_a_key);
+ 		}
++#else
++		/* without keys the authentication instructions leave a pointer as it is: store the plain one */
++		*signedAddr = unsignedAddr;
++#endif
+ 		break;
+ 
+ 	default:
+@@ -813,7 +828,7 @@ fixupCachePageAuth64(
+ 	} while (valid_chain);
+ 	return KERN_SUCCESS;
+ }
+-#endif /* defined(HAS_APPLE_PAC) */
++#endif /* DYLD_PAGER_ARM64E */
+ 
+ 
+ /*
+@@ -922,7 +937,7 @@ fixup_page(
+ 	 * Route to the appropriate fixup routine
+ 	 */
+ 	switch (hdr->mwli_pointer_format) {
+-#if defined(HAS_APPLE_PAC)
++#if DYLD_PAGER_ARM64E
+ 	case DYLD_CHAINED_PTR_ARM64E:
+ 		fixupPageAuth64(userVA, contents, pager, segInfo, pageIndex, false);
+ 		break;
+@@ -933,7 +948,7 @@ fixup_page(
+ 	case DYLD_CHAINED_PTR_ARM64E_SHARED_CACHE:
+ 		fixupCachePageAuth64(userVA, contents, pager, segInfo, pageIndex);
+ 		break;
+-#endif /* defined(HAS_APPLE_PAC) */
++#endif /* DYLD_PAGER_ARM64E */
+ 	case DYLD_CHAINED_PTR_64:
+ 		fixupPage64(userVA, contents, link_info, segInfo, pageIndex, false);
+ 		break;

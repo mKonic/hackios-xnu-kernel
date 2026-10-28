@@ -73,7 +73,7 @@ if ! skip boot && [ "$KIND" = phone ]; then
 	fi
 	[ -f $L ] || die "no xnuloader/$LOADER_OUT: run common/build.sh $DEVICE without SKIP=loader (the generic prebuilt is no substitute for $LOADER_OUT)"
 	python3 xnuloader/mkpayload.py -o out/usb-payload.bin loader.efi=$L --usb > /dev/null || die "mkpayload.py failed"
-	FD_BASE=$FD_BASE FD_SIZE=$FD_SIZE PAYLOAD_BASE=$PAYLOAD_BASE UEFI_FD=$UEFI_FD DTB=$DTB UEFI_TARGET=$UEFI_TARGET \
+	FD_BASE=$FD_BASE FD_SIZE=$FD_SIZE PAYLOAD_BASE=$PAYLOAD_BASE PAYLOAD_CAP=$PAYLOAD_CAP UEFI_FD=$UEFI_FD DTB=$DTB UEFI_TARGET=$UEFI_TARGET \
 		python3 mkxnuimg.py -p out/usb-payload.bin -o out/$DEVICE-boot.img || die "mkxnuimg.py failed"
 	echo "build: out/$DEVICE-boot.img (loader $(basename $L)) -- boot it with: fastboot boot out/$DEVICE-boot.img (or common/run.sh $DEVICE)"
 fi

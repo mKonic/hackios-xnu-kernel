@@ -1,0 +1,13 @@
+diff --git a/makedefs/MakeInc.top b/makedefs/MakeInc.top
+index 964d522665fc..ec95bf3064b6 100644
+--- a/makedefs/MakeInc.top
++++ b/makedefs/MakeInc.top
+@@ -298,7 +298,7 @@ endif
+ # $(warning PRIMARY_KERNEL_CONFIGS is $(PRIMARY_KERNEL_CONFIGS))
+ # $(warning VARIANT_CONFIGS is $(VARIANT_CONFIGS))
+ 
+-MEMORY_SIZE := $(shell /usr/sbin/sysctl -n hw.memsize)
++MEMORY_SIZE := $(shell /usr/sbin/sysctl -n hw.memsize 2>/dev/null || awk '/MemTotal/{printf "%d", $$2*1024}' /proc/meminfo)
+ 
+ # Assume LTO scaling by default, unless it is being explicitly passed on the command-line
+ LARGE_BUILD_FOOTPRINT := $(if $(BUILD_LTO),$(BUILD_LTO),1)

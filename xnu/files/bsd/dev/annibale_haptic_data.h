@@ -17,7 +17,7 @@
 #define ARB_CNFG_PHYS           0x0c42d000UL
 #define ARB_CNFG_SIZE           0x004000UL
 #define ARB_CHNLS_PHYS          0x0c500000UL
-#define ARB_CHNLS_SIZE          0x00010000UL            /* of its 4M: the channels one uses are far under */
+#define ARB_CHANNEL_SIZE        0x1000UL                /* one write channel of the device tree's 4 MB "chnls" */
 #define ARB_OBSRV_PHYS          0x0c440000UL
 #define ARB_OBSRV_SIZE          0x0080000UL
 
@@ -46,7 +46,6 @@
 #define CMD_REG(reg)            (((uint32_t)(reg) & 0xff) << 4)
 #define OPC_EXT_WRITEL          0                       /* eight bytes */
 #define OPC_EXT_READL           1                       /* ... read */
-#define OPC_EXT_WRITE           2                       /* four bytes */
 #define OPC_EXT_READ            13                      /* ... read */
 #define TRANSACT_TIMEOUT_US     2000
 

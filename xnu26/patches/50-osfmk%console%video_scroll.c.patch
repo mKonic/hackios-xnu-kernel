@@ -1,0 +1,23 @@
+diff --git a/osfmk/console/video_scroll.c b/osfmk/console/video_scroll.c
+index 439787daa518..b0b720a9511e 100644
+--- a/osfmk/console/video_scroll.c
++++ b/osfmk/console/video_scroll.c
+@@ -32,7 +32,8 @@
+ void
+ video_scroll_up(void * start, void * end, void * dest)
+ {
+-	bcopy(start, dest, ((char *)end - (char *)start) << 2);
++	/* The caller passes byte addresses, with end one past the copied range. */
++	bcopy(start, dest, (char *)end - (char *)start);
+ }
+ 
+ void
+@@ -40,5 +41,7 @@ video_scroll_down(void * start,      /* HIGH addr */
+     void * end,                      /* LOW addr */
+     void * dest)                     /* HIGH addr */
+ {
+-	bcopy(end, dest, ((char *)start - (char *)end) << 2);
++	/* start and dest are the high ends of their respective scanline ranges. */
++	size_t bytes = (char *)start - (char *)end;
++	bcopy(end, (char *)dest - bytes, bytes);
+ }

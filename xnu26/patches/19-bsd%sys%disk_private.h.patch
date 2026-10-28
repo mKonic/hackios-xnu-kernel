@@ -1,0 +1,13 @@
+diff --git a/bsd/sys/disk_private.h b/bsd/sys/disk_private.h
+index 730d48ce03b0..2983417adf56 100644
+--- a/bsd/sys/disk_private.h
++++ b/bsd/sys/disk_private.h
+@@ -44,7 +44,7 @@
+ typedef struct{
+ 	boolean_t mi_mdev; /* Is this a memdev device? */
+ 	boolean_t mi_phys; /* Physical memory? */
+-	uint32_t mi_base; /* Base page number of the device? */
++	uint64_t mi_base; /* Base page number of the device (a kernel VA page number does not fit in 32 bits) */
+ 	uint64_t mi_size; /* Size of the device (in ) */
+ } dk_memdev_info_t;
+ 

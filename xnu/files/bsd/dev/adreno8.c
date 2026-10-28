@@ -17,24 +17,55 @@
  *  11  SCM CX register initialization and GMU start, using inherited host DDR votes
  *  12  HFI queue start and version validation
  *  13  Performance and bandwidth tables
- *  14  Prepare GPU buffers and start HWSCHED, servicing GMU memory requests
- *  15  125 MHz/BW2 DCVS request and GMUCX status; requires keep and a host cold reset
- *  16  GPU SMMU context 0
+ *  14  Prepare GPU buffers, enable CB0 and start HWSCHED, servicing GMU memory requests
+ *  15  160 MHz/BW2 DCVS request and GMUCX status; requires keep and a host cold reset
+ *  16  Read back GPU SMMU context 0, routing, page tables and fault status
  *  17  OOB, GPU registers, SQE/AQE and CP initialization
  *  18  PAS 13 zap authentication
  *  19  Leave secure mode
  *  20  GPU scratch write/read verification
  *  21  Fault, queue, power and counter diagnostics
+ *  22  Standard HWSCHED context: two non-privileged IBs, timestamps and unregister
+ *  23  Enable external BO mappings and publish the RedwoodGPU service
  *
  * adreno8=N           execute steps 1..N
  * adreno8_only=K      execute only step K; its prerequisites must already exist in this kernel
  * adreno8_skip=MASK   skip selected steps (bit 0 selects step 1)
  * adreno8_pause=MS    pause before access groups in the newest step (default 2200 ms)
  * adreno8_fine=1      also pause before individual accesses in that step
+ * adreno8_raw_nop=N   stop before CP_INIT: 1=two RAW NOP words, 2=ten RAW NOP words,
+ *                  3=setup-only health checks without RAW publication
+ * adreno8_direct_ring=1  ordinary HFI and one direct ring; stage17/keep1/return0/gmuclk2,
+ *                  secure_preflight0, no only/skip/empty_powerup; raw_nop2 writes back inherited SQE control 0,
+ *                  raw_nop3 stops before SQE, default stops after CP_INIT idle
+ * adreno8_empty_powerup=1  stage-17 CP_INIT with a zeroed powerup page; stop after idle;
+ *                  requires keep=1 return=0, no only/skip/raw_nop; default uses the generated list
  * adreno8_watch=S     inspect GMU status for S seconds after step 11 or later (default 20)
  * adreno8_keep=1      retain resources; stage 15 requires a cold reset before memory reuse
- * adreno8_speed=N     GX operating point; only 1 (125 MHz) is exposed before SKU selection
- * adreno8_gmuclk=1    select the GPU PLL clock parent; default uses the crystal
+ * adreno8_secure_preflight=N  stage-14 secure memory mode. Mode 0 and unknown values
+ *                  stop after the read-only preflight; mode 1 reports the preflight result.
+ *                  Mode 2 transfers one kind-5 buffer and its tables, then stops without a
+ *                  reply. Mode 3 also configures context 3 while stream 2 remains faulted.
+ *                  Mode 4 repeats that setup in the same boot, validates the translate
+ *                  route, then replies to MEM_ALLOC. READY permits normal allocations and
+ *                  exact replay of the original secure request; new secure handles fail.
+ *                  All transferred pages remain allocated until cold reset.
+ * adreno8_cbscan=1    diagnostic only: after the step-8 SMMU read, print context-bank 0-5 and
+ *                  20 registers (SCTLR, TTBR0, TCR, FSR) and read context 3's SCTLR twice;
+ *                  read-only, the values enter no decision, off unless asked
+ * adreno8_gpu_stall=1  diagnostic only: stall faults in GPU contexts 0 and 3; poll fault
+ *                  registers with context fault interrupts disabled; GMU context 2 is unchanged
+ * adreno8_arc_read=1  stage-1 diagnostic: Apps DRV2 cx.lvl then mx.lvl reads; requires explicit
+ *                  touchscreen=0 and a host cold reset after any register write
+ * adreno8_speed=N     fastest GX speed: 1 (160 MHz) stays at 160 MHz; 2 (222 MHz) or 3 (342 MHz)
+ *                  lets the speed follow load and touches from 160 MHz up to it (adreno8_speed_tick)
+ * adreno8_inflight=N  submissions the context queue may hold ahead of the GPU, 1 to 8 (default 4);
+ *                  1 waits for each submission before the next, as stage 23 first did
+ * adreno8_gmuclk=1    retain CX/MX votes, initialize GMU 650/HUB 200 MHz, then GMU 500
+ *                  after START; requires touchscreen=0 wfi=0 wfe_mode=0; default uses the crystal
+ * adreno8_gmuclk=2    full stages 1..5 or 1..17 and later: highest supported CX/MX WRITE completion;
+ *                  same explicit zero parameters, no preceding ARC READ, keep=1 return=0;
+ *                  retain requests until cold reset; stage 17 and later permit START and CP commands
  * adreno8_return=1    return to the resident loader after cleanup
  *
  * Firmware family is gen80000, as loaded by Android and specified by the vendor gen8.0.0
@@ -46,7 +77,8 @@
  * adreno8_cx.c owns clocks, power and SCM; adreno8_gmu.c owns firmware and GMU startup;
  * adreno8_smmu.c owns address translation; adreno8_hfi.c owns HFI. Shared declarations and
  * wire layouts are in the private headers. socinfo SKU selection, host DDR voting, GPU
- * MMU/OOB startup and CP probes are being verified; the driver does not yet provide a GPU service.
+ * MMU/OOB startup and CP probes are being verified. Stage 23 publishes a GPU service only
+ * after the standard context self-test succeeds.
  */
 #include "adreno8_private.h"
 #include "adreno8_hwsched_private.h"
@@ -56,9 +88,14 @@
 
 uint32_t adreno8_skip_steps, adreno8_pause_ms = 2200, adreno8_fine, adreno8_watch_seconds = 20;
 
-uint32_t adreno8_speed_asked;                  /* adreno8_speed: 1 lowest (step 15) */
+uint32_t adreno8_speed_asked;                  /* adreno8_speed: the speed once drawing, 1 the slowest (adreno8_speed_tick) */
 
-uint32_t adreno8_gmu_from_pll;                 /* adreno8_gmuclk=1 */
+uint32_t adreno8_inflight = 4;                 /* adreno8_inflight (adreno8_context_submit) */
+
+uint32_t adreno8_gmu_from_pll;                 /* adreno8_gmuclk */
+
+bool adreno8_direct_ring;                      /* cold-boot ordinary HFI/CP_INIT diagnostic */
+bool adreno8_gpu_stall;                        /* adreno8_gpu_stall=1 */
 
 uint32_t adreno8_step;                         /* the one being performed */
 
@@ -100,10 +137,9 @@ adreno8_sleep_ms(uint32_t ms)
 /* ---- register access ------------------------------------------------------------------------------- */
 
 /*
- * One access is one plain load or store of a general register. Some of what is touched here (the
- * SMMU at least) is not the hardware but the hypervisor's imitation of it: the access traps and
- * is carried out on our behalf, which works for the simplest instruction forms only. So the
- * compiler does not get to choose the instruction. (redwood_adreno.c, unchanged.)
+ * Some Qualcomm hypervisors emulate SMMU global-register accesses and do not handle
+ * XZR/WZR stores. Keep a simple general-register ldr/str form; emulation coverage
+ * on this device is unconfirmed.
  */
 
 uint32_t __attribute__((noinline))
@@ -115,10 +151,16 @@ adreno8_rd(vm_offset_t address)
 	return value;
 }
 
+extern void loader_log_line(const char *line);
+
 void __attribute__((noinline))
 adreno8_wr(vm_offset_t address, uint32_t value)
 {
+	/* CP_SQE_CNTL is dword 0x815; these RAM-only lines surround the raw store after any access pause. */
+	bool ordinary_sqe = adreno8_direct_ring && adreno8_gpu.base && address == adreno8_gpu.base + 0x2054;
+	if (ordinary_sqe) loader_log_line("adreno8: ordinary SQE raw STR enter\n");
 	__asm__ volatile ("str %w0, [%1]" : : "r" (value), "r" (address) : "memory");
+	if (ordinary_sqe) loader_log_line("adreno8: ordinary SQE raw STR returned\n");
 }
 
 /* A stretch of registers; mapped when a step first needs it. */
@@ -218,6 +260,7 @@ adreno8_wait_for(struct adreno8_block *b, uint32_t offset, uint32_t mask, uint32
 /* ---- leaving --------------------------------------------------------------------------------------------- */
 
 bool adreno8_gpu8_keep, adreno8_gpu8_return;
+uint32_t adreno8_gpu8_secure_mode;
 bool adreno8_reset_required;
 
 /* Stop GMU access before releasing mapped memory; restore CX configuration if changed. */
@@ -288,13 +331,14 @@ adreno8_gpu8_block_stop(void)
 /* ---- the walk ----------------------------------------------------------------------------------------------- */
 
 static bool
-adreno8_step_hwsched(void)
+adreno8_step_core_start(void)
 {
 	if (!adreno8_gpu8_keep || adreno8_gpu8_return) {
-		printf("adreno8: HWSCHED probes require keep=1, return=0 and host cold reset\n");
+		printf("adreno8: GPU startup probes require keep=1, return=0 and host cold reset\n");
 		return false;
 	}
-	return adreno8_gpu_prepare() && adreno8_hwsched_start();
+	return adreno8_gpu_prepare() && adreno8_gpu_memory_enable() &&
+	    (adreno8_direct_ring ? adreno8_ordinary_start() : adreno8_hwsched_start());
 }
 
 static bool
@@ -316,12 +360,14 @@ adreno8_init(void)
 	static bool (*const each[])(void) = {
 		adreno8_step_outside, adreno8_step_gpucc, adreno8_step_cx_power, adreno8_step_cx_awake, adreno8_step_clocks,
 		adreno8_step_first_words, adreno8_step_gmu_memory, adreno8_step_smmu_read, adreno8_step_gmu_space, adreno8_step_firmware,
-		adreno8_step_gmu_start, adreno8_step_queues, adreno8_step_tables, adreno8_step_hwsched,
-		adreno8_step_gx_power, adreno8_gpu_memory_enable, adreno8_gpu_cp_init, adreno8_step_zap,
-		adreno8_step_secure_exit, adreno8_gpu_scratch_test, adreno8_step_last_look
+		adreno8_step_gmu_start, adreno8_step_queues, adreno8_step_tables, adreno8_step_core_start,
+		adreno8_step_gx_power, adreno8_gpu_memory_verify, adreno8_gpu_cp_init, adreno8_step_zap,
+		adreno8_step_secure_exit, adreno8_gpu_scratch_test, adreno8_step_last_look, adreno8_context_test,
+		adreno8_step_service
 	};
 	const unsigned count = sizeof(each) / sizeof(each[0]);
-	uint32_t asked = 0, only = 0, one = 0, completed = 0;
+	uint32_t asked = 0, only = 0, one = 0, completed = 0, empty_powerup = 0, raw_nop = 0;
+	uint32_t direct_ring = 0, secure_mode_arg = 0;
 
 	if (!PE_parse_boot_argn("adreno8", &asked, sizeof(asked)) || asked == 0) {
 		return;
@@ -330,13 +376,49 @@ adreno8_init(void)
 	PE_parse_boot_argn("adreno8_pause", &adreno8_pause_ms, sizeof(adreno8_pause_ms));
 	PE_parse_boot_argn("adreno8_watch", &adreno8_watch_seconds, sizeof(adreno8_watch_seconds));
 	PE_parse_boot_argn("adreno8_speed", &adreno8_speed_asked, sizeof(adreno8_speed_asked));
+	PE_parse_boot_argn("adreno8_inflight", &adreno8_inflight, sizeof(adreno8_inflight));
 	PE_parse_boot_argn("adreno8_gmuclk", &adreno8_gmu_from_pll, sizeof(adreno8_gmu_from_pll));
 	adreno8_gpu8_keep = PE_parse_boot_argn("adreno8_keep", &one, sizeof(one)) && one != 0;
 	one = 0;
 	adreno8_gpu8_return = PE_parse_boot_argn("adreno8_return", &one, sizeof(one)) && one != 0;
 	one = 0;
+	if (PE_parse_boot_argn("adreno8_secure_preflight", &one, sizeof(one))) {
+		if (one <= SECURE_MODE_TRANSLATION_B) {
+			adreno8_gpu8_secure_mode = one;
+		} else {
+			printf("adreno8: adreno8_secure_preflight=%u is not a known mode; the secure path stays off\n", one);
+		}
+	}
+	secure_mode_arg = one;
+	one = 0;
+	if (PE_parse_boot_argn("adreno8_cbscan", &one, sizeof(one)) && one != 0) {
+		adreno8_smmu_cb_scan_ask();
+	}
+	one = 0;
 	adreno8_fine = PE_parse_boot_argn("adreno8_fine", &one, sizeof(one)) && one != 0;
+	one = 0;
+	adreno8_gpu_stall = PE_parse_boot_argn("adreno8_gpu_stall", &one, sizeof(one)) && one == 1;
 	PE_parse_boot_argn("adreno8_skip", &adreno8_skip_steps, sizeof(adreno8_skip_steps));
+	PE_parse_boot_argn("adreno8_empty_powerup", &empty_powerup, sizeof(empty_powerup));
+	PE_parse_boot_argn("adreno8_raw_nop", &raw_nop, sizeof(raw_nop));
+	PE_parse_boot_argn("adreno8_direct_ring", &direct_ring, sizeof(direct_ring));
+	adreno8_direct_ring = direct_ring == 1;
+	if (direct_ring && (direct_ring != 1 || asked != 17 || only != 0 ||
+	    adreno8_skip_steps != 0 || !adreno8_gpu8_keep || adreno8_gpu8_return || (raw_nop != 0 && raw_nop != 2 && raw_nop != 3) ||
+	    empty_powerup != 0 || secure_mode_arg != 0 || adreno8_gmu_from_pll != 2)) {
+		printf("adreno8: direct_ring=1 requires complete adreno8=17, keep=1 return=0 gmuclk=2 secure_preflight=0 raw_nop=0/2/3 without only, skip or empty_powerup; no steps attempted\n");
+		return;
+	}
+	if (empty_powerup && (empty_powerup != 1 || asked != 17 || only != 0 ||
+	    adreno8_skip_steps != 0 || !adreno8_gpu8_keep || adreno8_gpu8_return || raw_nop != 0)) {
+		printf("adreno8: empty_powerup=1 requires adreno8=17, keep=1 return=0 without only, skip or raw_nop; no steps attempted\n");
+		return;
+	}
+	if (adreno8_gmu_from_pll == 2 && ((asked != 5 && asked < 17) || only != 0 ||
+	    adreno8_skip_steps != 0 || !adreno8_gpu8_keep || adreno8_gpu8_return)) {
+		printf("adreno8: gmuclk=2 requires adreno8=5 or 17 and later, keep=1 return=0 without only or skip; no steps attempted\n");
+		return;
+	}
 	if (asked > count) {
 		asked = count;
 	}

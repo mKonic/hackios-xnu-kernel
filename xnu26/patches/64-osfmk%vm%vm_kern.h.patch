@@ -1,0 +1,17 @@
+diff --git a/osfmk/vm/vm_kern.h b/osfmk/vm/vm_kern.h
+index ddfae66cd7f2..0bfcbd10e2cf 100644
+--- a/osfmk/vm/vm_kern.h
++++ b/osfmk/vm/vm_kern.h
+@@ -469,4 +469,12 @@ extern const char *kern_allocation_get_name(
+ 
+ __END_DECLS
+ 
++#if XNU_KERNEL_PRIVATE
++/*
++ * redwood: the drivers shared with xnu-8796 (xnu/files) take kmem_alloc(), kmem_free() and the
++ * KMA_ flags from this header, where 8796 has them; 12377 moved them to vm_kern_xnu.h.
++ */
++#include <vm/vm_kern_xnu.h>
++#endif /* XNU_KERNEL_PRIVATE */
++
+ #endif  /* _VM_VM_KERN_H_ */

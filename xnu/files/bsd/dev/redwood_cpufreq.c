@@ -10,6 +10,8 @@
  * says more).
  *
  * Register layout: Linux drivers/cpufreq/qcom-cpufreq-hw.c ("epss" variant).
+ *
+ * The REDMI K90 (annibale) asks its CPUCP firmware over SCMI instead: annibale_cpufreq.c.
  */
 #include <kern/clock.h>
 #include <kern/thread.h>
@@ -560,6 +562,12 @@ redwood_cpufreq_init(void)
 	const ml_topology_info_t *topology = ml_get_topology_info();
 	uint32_t enabled = 0, cores[EPSS_DOMAINS] = { 0 }, before, here;
 
+	if (redwood_platform_is_annibale()) {
+		/* (EPSS_PHYS and RSC_PHYS are redwood's: SM8750 has no EPSS for its cores, and its RSC is at 0x16500000) */
+		load_start();
+		annibale_cpufreq_init();
+		return;
+	}
 	if (redwood_platform_blocks_legacy_drivers()) {
 		printf("cpufreq: legacy RPMh/EPSS initialization skipped by platform guard\n");
 		return;

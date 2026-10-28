@@ -11,6 +11,13 @@ load_device() {
 	[ -n "$name" ] || die "which device? $(ls common/devices | sed -n 's/\.conf$//p' | grep -v '^_' | tr '\n' ' ')"
 	local conf=common/devices/$name.conf
 	[ -f "$conf" ] || die "no profile $conf (common/new-device.sh $name makes one)"
+	# The strict payload contract is selected by the device config, so clear any
+	# PAYLOAD_CAP the environment inherited before sourcing the profile: the
+	# profile decides it, a device that omits it stays legacy. That keeps a
+	# legacy device legacy when the shell earlier loaded an annibale profile.
+	# A direct mkxnuimg.py caller sets PAYLOAD_CAP in its own environment and
+	# never goes through load_device, so that path is unchanged.
+	unset PAYLOAD_CAP
 	# shellcheck disable=SC1090
 	. "$conf"
 	DEVICE=$name

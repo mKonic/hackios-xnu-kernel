@@ -102,12 +102,12 @@ GenericARMCPU::start(IOService * provider)
 	info.phys_id = physID;
 	info.cluster_id = topology->cluster_id;
 	info.cluster_type = topology->cluster_type;
+	setCPUState(kIOCPUStateUninitalized);
 	if (ml_processor_register(&info, &machProcessor, &ipi_handler, &pmi_handler) != KERN_SUCCESS) {
 		IOLog("GenericARMCPU: ml_processor_register failed\n");
 		return false;
 	}
 
-	setCPUState(kIOCPUStateUninitalized);
 	registerService();
 	IOLog("GenericARMCPU: cpu %u (phys id 0x%x) registered\n", (unsigned)getCPUNumber(), physID);
 	return true;
@@ -216,6 +216,8 @@ GenericARMPE::start(IOService * provider)
 		return false;
 	}
 	IOLog("GenericARMPE: platform \"%s\"\n", provider->getName());
+	/* XNU 12377 boots CPUs inside ml_processor_register(), before start() returns. */
+	psci_smp_init();
 
 	/*
 	 * super::start() published the /cpus children as nubs. Attach a CPU driver to each
@@ -252,9 +254,6 @@ GenericARMPE::start(IOService * provider)
 	if (cpus[master_cpu] != NULL) {
 		/* Unblocks everything that waits for the CPU count to be known. */
 		ml_set_max_cpus(count);
-		if (count > 1) {
-			psci_smp_init();
-		}
 		/*
 		 * The slower cores (an L2 access penalty, the loader's "small-core") are started 28 seconds
 		 * later (boot-arg small_cores_after=S; 0: at once). With all seven from the start the lock

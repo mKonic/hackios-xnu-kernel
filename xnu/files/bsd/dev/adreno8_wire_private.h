@@ -105,23 +105,34 @@ adreno8_fw_validate(const uint8_t *data, uint32_t bytes)
 #define ADRENO8_HFI_QUEUE_DWORDS 1024u
 #define ADRENO8_HFI_MAX_DWORDS 255u
 #define ADRENO8_HFI_HEADER(q) (6u + 12u * (q))
+#define ADRENO8_HFI_TABLE_DWORDS (6u + 12u * 17u)
+#define ADRENO8_HFI_QUEUE_OFFSET(q) \
+	(((ADRENO8_HFI_TABLE_DWORDS * 4u + 15u) & ~15u) + (q) * ADRENO8_HFI_QUEUE_DWORDS * 4u)
+#define ADRENO8_HFI_ALLOC_BYTES ((ADRENO8_HFI_QUEUE_OFFSET(ADRENO8_HFI_QUEUE_COUNT) + 0xfffu) & ~0xfffu)
 
-/* Queue addresses are independent of header offsets. Each queue occupies 4 KiB. */
-static inline void
-adreno8_hfi_init_table(uint32_t *table, uint32_t address)
+/* HWSCHED reserves 17 headers. Ordinary HFI places three queues on 4 KiB boundaries. */
+static inline uint32_t
+adreno8_hfi_queue_offset(uint32_t queue, bool ordinary)
 {
-	memset(table, 0, 4096);
-	/* The vendor ABI reserves 14 dispatch headers after the three active queues. */
-	table[1] = 6 + 12 * 17;
+	return ordinary ? (queue + 1u) * 4096u : ADRENO8_HFI_QUEUE_OFFSET(queue);
+}
+
+static inline void
+adreno8_hfi_init_table(uint32_t *table, uint32_t address, bool ordinary)
+{
+	memset(table, 0, ADRENO8_HFI_TABLE_DWORDS * 4u);
+	/* a6xx_hfi_init stores ordinary table size in bytes; HWSCHED stores dwords. */
+	table[1] = ordinary ? (6u + 12u * ADRENO8_HFI_QUEUE_COUNT) * 4u : ADRENO8_HFI_TABLE_DWORDS;
 	table[2] = 6;
 	table[3] = 12;
 	table[4] = table[5] = ADRENO8_HFI_QUEUE_COUNT;
 	for (uint32_t q = 0; q < ADRENO8_HFI_QUEUE_COUNT; q++) {
 		uint32_t *h = table + ADRENO8_HFI_HEADER(q);
 		h[0] = 1;
-		h[1] = address + 4096 * (q + 1);
-		h[2] = q; /* HWSCHED uses priority zero for command, message and debug queues. */
+		h[1] = address + adreno8_hfi_queue_offset(q, ordinary);
+		h[2] = ordinary ? 0xa00u | q : q;
 		h[3] = ADRENO8_HFI_QUEUE_DWORDS;
+		if (ordinary) h[6] = h[7] = h[8] = 1;
 	}
 }
 

@@ -1,0 +1,11 @@
+diff --git a/osfmk/conf/files b/osfmk/conf/files
+index 75bbfc1c1a4d..48d247ad978d 100644
+--- a/osfmk/conf/files
++++ b/osfmk/conf/files
+@@ -407,3 +407,6 @@ osfmk/corecrypto/ccsha512_ltc_di.c	standard
+ 
+ osfmk/prng/prng_random.c	standard
+ osfmk/prng/entropy.c   standard
++osfmk/minicrypto/mc_digests.c	standard
++osfmk/minicrypto/mc_provider.c	standard
++osfmk/minicrypto/mc_aes.c	standard

@@ -1,0 +1,27 @@
+diff --git a/iokit/KernelConfigTables.cpp b/iokit/KernelConfigTables.cpp
+index 559a9db93d25..49b97956c79a 100644
+--- a/iokit/KernelConfigTables.cpp
++++ b/iokit/KernelConfigTables.cpp
+@@ -32,6 +32,10 @@
+  * Version 2.0.
+  */
+ 
++#if defined(__arm64__)
++#include <pexpert/arm64/board_config.h>
++#endif
++
+ const char * gIOKernelConfigTables =
+     "("
+     "   {"
+@@ -44,4 +48,11 @@ const char * gIOKernelConfigTables =
+     "     'IOProviderClass' = IOService;"
+     "     'IOExclaveProxy'  = 1:32;"
+     "   }"
++#if defined(__arm64__) && !defined(APPLE_ARM64_ARCH_FAMILY)
++    "   ,{"
++    "     'IOClass'         = GenericARMPE;"
++    "     'IOProviderClass' = IOPlatformExpertDevice;"
++    "     'IOProbeScore'    = 1000:32;"
++    "   }"
++#endif
+     ")";

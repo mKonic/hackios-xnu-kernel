@@ -65,10 +65,11 @@ extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
 extern kern_return_t thread_terminate(thread_t thread);
 extern void loader_log_putc(char c);
 
-static vm_offset_t arb_core, arb_cnfg, arb_chnls, arb_obsrvr;
+static vm_offset_t arb_core, arb_cnfg, arb_obsrvr;
 static int level;
 static uint32_t amplitude = 0x60;
 static bool configured, playing, broken, leaving;
+static bool written;                            /* something was written: the way out disables the module, configured or not */
 
 /* every line to the loader's log as well (and to the console when that may be written) */
 static int say(const char *format, ...) __printflike(1, 2);
@@ -129,6 +130,7 @@ static struct {
 	uint16_t        ppid;                             /* slave << 8 | function: 0x7f0, 0x7f1, 0x7f2 -- slave 7 (PMIH010X #7), function 0xf0..0xf2 */
 	uint16_t        apid;                             /* the channel it is reached through */
 	bool            found, ours;                      /* and whether the system that may write is ours */
+	vm_offset_t     channel;                          /* its write channel, mapped once known (648 to 650 on this phone) */
 } pbuf[3] = { { HAP_DRIVER }, { HAP_PATTERN }, { HAP_BOOST } };
 
 static bool
@@ -206,9 +208,11 @@ spmi_write16(uint16_t ppid, uint16_t addr, const uint8_t *bytes, uint32_t count)
 	const char *problem = NULL;
 	int apid = -1;
 
+	channel = 0;
 	for (unsigned i = 0; i < sizeof(pbuf) / sizeof(pbuf[0]); i++) {
 		if (pbuf[i].found && pbuf[i].ppid == ppid) {
 			apid = pbuf[i].apid;
+			channel = pbuf[i].channel;
 			if (!pbuf[i].ours) {
 				problem = "the arbiter lets another system write that peripheral";
 			}
@@ -220,8 +224,10 @@ spmi_write16(uint16_t ppid, uint16_t addr, const uint8_t *bytes, uint32_t count)
 	if (problem != NULL) {
 		return problem;
 	}
+	if (channel == 0) {
+		return "the peripheral's write channel is not mapped";
+	}
 	nanoseconds_to_absolutetime(TRANSACT_TIMEOUT_US * (uint64_t)NSEC_PER_USEC, &interval);
-	channel = arb_chnls + 0x1000UL * (uint32_t)apid;
 	uint32_t w0 = 0, w1 = 0;
 
 	for (uint32_t i = 0; i < count && i < 8; i++) {
@@ -236,7 +242,8 @@ spmi_write16(uint16_t ppid, uint16_t addr, const uint8_t *bytes, uint32_t count)
 	if (count > 4) {
 		wr(channel + CH_WDATA1, w1);
 	}
-	wr(channel + CH_CMD, CMD_OPC(count > 4 ? OPC_EXT_WRITEL : OPC_EXT_WRITE) | CMD_REG(addr & 0xff) | (count - 1));
+	/* Extended Register Write Long for every write: the short form left annibale_torch.c's register unchanged */
+	wr(channel + CH_CMD, CMD_OPC(OPC_EXT_WRITEL) | CMD_REG(addr & 0xff) | (count - 1));
 	do {
 		status = rd(channel + CH_STATUS);
 		now = mach_absolute_time();
@@ -330,6 +337,9 @@ find_peripherals(void)
 	for (unsigned i = 0; i < sizeof(pbuf) / sizeof(pbuf[0]); i++) {
 		if (!pbuf[i].found) {
 			say("haptic: no channel of the arbiter is haptics function %#x\n", pbuf[i].ppid & 0xff);
+		} else if (pbuf[i].ours) {
+			/* (the whole 4 MB of write channels cannot be mapped this early in the boot: kmem_alloc fails) */
+			pbuf[i].channel = ml_io_map(ARB_CHNLS_PHYS + ARB_CHANNEL_SIZE * pbuf[i].apid, ARB_CHANNEL_SIZE);
 		}
 	}
 	return pbuf[0].found && pbuf[1].found;
@@ -381,12 +391,21 @@ static bool
 configure(void)
 {
 	uint32_t tlra = LRA_PERIOD_US / 5;
-	uint8_t two[2], eight[8];
+	uint8_t two[2], eight[8], clear = HAP_FAULT_CLR_ALL, fault = 0;
 
+	written = true;
 	if (!module_enable(true)) {
 		return false;
 	}
-	if (!hap_put(HAP_DRIVER, HAP_CFG_FAULT_CLR, HAP_FAULT_CLR_ALL, true)) {
+	/* FAULT_CLR is a command whose bits clear themselves (it reads 0): the fault status tells instead */
+	if (spmi_write16(HAP_DRIVER, HAP_CFG_FAULT_CLR, &clear, 1) != NULL || !hap_read(HAP_DRIVER, HAP_CFG_FAULT_STATUS, &fault, 1)) {
+		say("haptic: clearing the faults did not go through\n");
+		broken = true;
+		return false;
+	}
+	if (fault != 0) {
+		say("haptic: the fault status is %#04x after clearing\n", fault);
+		broken = true;
 		return false;
 	}
 	if (!hap_put(HAP_DRIVER, HAP_CFG_VMAX, VMAX_MV / 50, false)) {     /* 1300 mV as this phone's device tree says */
@@ -654,9 +673,8 @@ haptic_thread(__unused void *parameter, __unused wait_result_t result)
 {
 	arb_core = ml_io_map(ARB_CORE_PHYS, ARB_CORE_SIZE);
 	arb_cnfg = ml_io_map(ARB_CNFG_PHYS, ARB_CNFG_SIZE);
-	arb_chnls = ml_io_map(ARB_CHNLS_PHYS, ARB_CHNLS_SIZE);
 	arb_obsrvr = ml_io_map(ARB_OBSRV_PHYS, ARB_OBSRV_SIZE);
-	if (arb_core == 0 || arb_cnfg == 0 || arb_chnls == 0 || arb_obsrvr == 0) {
+	if (arb_core == 0 || arb_cnfg == 0 || arb_obsrvr == 0) {
 		say("haptic: the arbiter's windows cannot be mapped: nothing is done\n");
 		goto done;
 	}
@@ -681,7 +699,7 @@ haptic_thread(__unused void *parameter, __unused wait_result_t result)
 		serve();
 	}
 done:
-	if (configured) {
+	if (written) {
 		static const uint8_t stop_play = HAP_SRC_DIRECT, module_off = 0;
 
 		(void)spmi_write16(HAP_DRIVER, HAP_CFG_SPMI_PLAY, &stop_play, 1);
@@ -715,7 +733,7 @@ annibale_haptic_init(void)
 void
 annibale_haptic_quiesce(void)
 {
-	if (configured) {
+	if (written) {
 		static const uint8_t stop_play = HAP_SRC_DIRECT, module_off = 0;
 
 		leaving = true;

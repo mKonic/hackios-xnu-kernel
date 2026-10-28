@@ -1,5 +1,5 @@
 /*
- * annibale: paste into xnuloader/loader.c next to platform_redwood and add &platform_annibale to platforms[].
+ * annibale: paste into xnuloader/platform_private.h next to platform_redwood and add &platform_annibale to platforms[].
  * Every value is explained in docs/PORTING.md ("The loader").
  */
 static const struct platform platform_annibale = {

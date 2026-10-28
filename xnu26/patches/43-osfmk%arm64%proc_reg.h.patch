@@ -1,0 +1,19 @@
+diff --git a/osfmk/arm64/proc_reg.h b/osfmk/arm64/proc_reg.h
+index f4d148bd1b44..d3bb7ea584c3 100644
+--- a/osfmk/arm64/proc_reg.h
++++ b/osfmk/arm64/proc_reg.h
+@@ -243,6 +243,14 @@
+ /* D-Cache, 128KB for Acc8 PCore, 8-way. 64KB for ECore, 8-way. */
+ #define MMU_CLINE   6                      /* cache line size is 1<<MMU_CLINE (64) */
+ 
++#elif defined (BCM2837) /* Raspberry Pi 3 */
++
++/* I-Cache. We don't have detailed spec so we just follow the ARM technical reference. */
++#define MMU_I_CLINE 6
++
++/* D-Cache. */
++#define MMU_CLINE   6
++
+ #elif defined (VMAPPLE)
+ 
+ /* I-Cache. */

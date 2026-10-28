@@ -1,0 +1,17 @@
+diff --git a/osfmk/vm/vm_compressor.c b/osfmk/vm/vm_compressor.c
+index 147488f36ea4..8c6160157a98 100644
+--- a/osfmk/vm/vm_compressor.c
++++ b/osfmk/vm/vm_compressor.c
+@@ -864,6 +864,12 @@ vm_compressor_set_size(void)
+ 
+ 	if (vm_compression_limit == 0) {
+ 		compressor_pool_size = max_mem;
++#if defined(ARM64_BOARD_CONFIG_BCM2837)
++		/* heap VA, see ZONE_MAP_VA_SIZE in zalloc.c; the pool's VA is ~1.2x its size */
++		if (compressor_pool_size > (4ULL << 30)) {
++			compressor_pool_size = 4ULL << 30;
++		}
++#endif
+ 	}
+ 
+ #if XNU_TARGET_OS_WATCH

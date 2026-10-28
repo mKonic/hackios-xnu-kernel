@@ -10,7 +10,9 @@
 # splits one of the two copies. Count distinct events instead -- by timestamp, or by program and pid for
 # "Successfully spawned". The phone's logs do not do this; `xl log` fetches the buffer once.
 #
-# env: ROOT=<small image>, IMG=<system image>, CMDLINE=<extra boot-args>
+# env: ROOT=<small image>, IMG=<system image>, CMDLINE=<extra boot-args>, KERNEL=<kernel to boot>
+#      MEMSIZE=<hex>       the kernel's memory window, if not the loader's 6 GB (xnuloader/mkpayload.py --memsize)
+#      IDENTITY=v57        the iPhone the device tree names, if not the iPhone X (xnuloader/mkpayload.py --identity)
 #      QEMU_RAM_GB=<n>     the guest's RAM, default 7: memory then ends where the phone's does and the
 #                          kernel gets the same 4.2 GB window (the system image included) as on the phone.
 #                          The host needs about 2.5 GB per running instance.
@@ -36,7 +38,7 @@
 # file that holds the image at the right offset (reflinked, so it costs neither disk space nor
 # host RAM).
 cd "$(dirname "$(readlink -f "$0")")/.." || exit 1
-K=xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837
+K=${KERNEL:-xnu-src/xnu-8796.121.2/BUILD/obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837}
 [ -f $K ] || { K=prebuilt/mach.development.bcm2837; echo "run-ios.sh: no kernel built here, using $K" >&2; }
 IMG=${IMG:-userland/system.apfs}
 ROOT=${ROOT:-userland/root.apfs}
@@ -44,7 +46,7 @@ ROOT=${ROOT:-userland/root.apfs}
 SECS=${1:-60}; shift
 RAM_BASE=0x40000000 RD_ADDR=0xFC000000
 RAM_GB=${QEMU_RAM_GB:-7}
-RAM_SIZE=$((RAM_GB << 30)) FILE_SIZE=$((12 << 30))
+RAM_SIZE=$((RAM_GB << 30)) FILE_SIZE=$(((RAM_GB > 12 ? RAM_GB : 12) << 30))
 INSTANCE=${QEMU_INSTANCE:-$(cat qemu/instance 2>/dev/null || echo 0)}
 # an instance takes 2.5-3 GB of host memory; starting one that does not fit gets something killed
 AVAILABLE=$(awk '/^MemAvailable:/ { print int($2 / 1024) }' /proc/meminfo)
@@ -53,24 +55,53 @@ if [ "${AVAILABLE:-9999}" -lt 3000 ] && [ -z "$QEMU_FORCE" ]; then
 	exit 1
 fi
 
-if [ ! -f qemu/ram.img ] || [ "$IMG" -nt qemu/ram.img ]; then
-	python3 - "$IMG" qemu/ram.img $((RD_ADDR - RAM_BASE)) $FILE_SIZE <<'PY' || exit 1
-import os, sys
-src = os.open(sys.argv[1], os.O_RDONLY)
-dst = os.open(sys.argv[2], os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
+# Record the input image too: an older image may be selected for the next run.
+python3 - "$IMG" qemu/ram.img $((RD_ADDR - RAM_BASE)) $FILE_SIZE <<'PY' || exit 1
+import json, os, pathlib, sys
+source = pathlib.Path(sys.argv[1]).resolve()
+metadata = pathlib.Path(sys.argv[2] + '.source')
+st = source.stat()
+identity = {'source': str(source), 'size': st.st_size, 'mtime_ns': st.st_mtime_ns}
 offset, size = int(sys.argv[3]), int(sys.argv[4])
+try:
+    cached = json.loads(metadata.read_text())
+except (OSError, ValueError):
+    cached = None
+target = pathlib.Path(sys.argv[2])
+if target.is_file() and cached == identity and target.stat().st_size >= offset + st.st_size:
+    sys.exit(0)
+metadata.unlink(missing_ok=True)
+src = os.open(source, os.O_RDONLY)
+dst = os.open(sys.argv[2], os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o644)
 os.ftruncate(dst, size)
 total, done = os.fstat(src).st_size, 0
 cfr = getattr(os, "copy_file_range", None)        # Linux only; macOS falls to the read/write loop
 if cfr:
     while done < total:
-        done += cfr(src, dst, total - done, done, offset + done)
+        copied = cfr(src, dst, total - done, done, offset + done)
+        if copied == 0:
+            raise RuntimeError("system image copy made no progress")
+        done += copied
 else:
     os.lseek(src, 0, os.SEEK_SET); os.lseek(dst, offset, os.SEEK_SET)
     while done < total:
-        done += os.write(dst, os.read(src, 1 << 22))
+        data = os.read(src, min(1 << 22, total - done))
+        if not data:
+            raise RuntimeError("system image ended before its recorded size")
+        view = memoryview(data)
+        while view:
+            written = os.write(dst, view)
+            if written == 0:
+                raise RuntimeError("system image write made no progress")
+            done += written
+            view = view[written:]
+os.close(src)
+os.close(dst)
+metadata.write_text(json.dumps(identity) + '\n')
 PY
-fi
+# a guest bigger than the file: the file grows (sparse), the image in it stays where it is
+python3 -c 'import os, sys; os.path.getsize(sys.argv[1]) >= int(sys.argv[2]) or os.truncate(sys.argv[1], int(sys.argv[2]))' \
+	qemu/ram.img $FILE_SIZE || exit 1
 NET=()
 if [ -n "$QEMU_NET" ] && [ "$QEMU_NET" != 0 ]; then
 	NET=(-netdev user,id=net0 -device virtio-net-device,netdev=net0)
@@ -148,10 +179,11 @@ EMU=()
 # the profile's four cores (common/devices/qemu-virt.conf); QEMU_SMP=1 for one
 export QEMU_SMP=${QEMU_SMP:-4}
 [[ " $CMDLINE " == *" cpus="* ]] || CMDLINE="cpus=$QEMU_SMP $CMDLINE"
-# the kernel hands back to the loader after SECS and QEMU is stopped 40 s later; 0: neither
+# the kernel hands back to the loader after SECS and QEMU is stopped 180 s later (the loader returns up to
+# 1.5 MiB of diagnostics over the emulated serial port); 0: neither
 LIMIT=; LIMIT_QEMU=0
-[ "$SECS" != 0 ] && LIMIT="loader_return_after=$SECS" LIMIT_QEMU=$((SECS + 40))
-xnuloader/mkpayload.py -o qemu/payload.bin kernel=$K ramdisk=$ROOT --rdres "$(printf '%x' "$(stat -c %s "$IMG")")" \
+[ "$SECS" != 0 ] && LIMIT="loader_return_after=$SECS" LIMIT_QEMU=$((SECS + 180))
+xnuloader/mkpayload.py -o qemu/payload.bin kernel=$K ramdisk=$ROOT --rdres "$(printf '%x' "$(stat -c %s "$IMG")")" ${MEMSIZE:+--memsize $MEMSIZE} ${IDENTITY:+--identity $IDENTITY} \
 	--cmdline "$LIMIT epoch=$(date +%s) virtio_input=1 $CMDLINE" >/dev/null || exit 1
 PROFILE=()
 [ -n "$QEMU_PROFILE" ] && PROFILE=(-plugin "$PWD/out/qemu/lib/libsampler.so,out=$(readlink -f "$QEMU_PROFILE")")

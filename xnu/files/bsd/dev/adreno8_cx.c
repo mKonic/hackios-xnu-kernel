@@ -1,19 +1,20 @@
 /* SM8750 GPU power, clocks, CMD DB and SCM initialization. */
 #include "adreno8_private.h"
+#include "adreno8_rpmh_private.h"
+#include "adreno8_clock_private.h"
 
 #define printf adreno8_say
 
 /* ---- step 1: what feeds the GPU from outside --------------------------------------------------------- */
 
 /*
- * dt: clock-controller@100000. Of the GPU's clocks here only gcc_ddrss_gpu_axi (0x71150, the
- * memory bus tap) is interesting and writable: gcc_gpu_cfg_ahb, the clock of the GPU clock
- * controller's own registers, is on this SoC among the clock controller's PROTECTED clocks --
- * the hypervisor's, with no clock driver entry in Linux at all -- so it is neither written nor
- * depended on; the loader runs it, and step 2 reads whether that is still true.
+ * gcc-sun.c defines independent DDRSS_GPU_AXI (0x71150) and GPU_GEMNOC_GFX (0x71010)
+ * branches. GPUCC MEMNOC_GFX (0x90f4) is another independent branch. GCC_GPU_CFG_AHB has
+ * no entry in gcc_sun_clocks[]; this probe preserves its loader configuration and checks
+ * GPUCC register access in step 2.
  */
 
-static struct adreno8_block adreno8_gcc = { "gcc", 0x00100000, 0x80000 };
+struct adreno8_block adreno8_gcc = { "gcc", 0x00100000, 0x80000 };
 
 /* dt: reserved-memory cmd_db@81c60000, 0x20000: the boot loader's list of what RPMh can switch */
 
@@ -109,10 +110,14 @@ static struct adreno8_block adreno8_qfprom = { "qfprom", 0x221c8000, 0x1000 };
 
 /*
  * KGSL selects qcom,sku-codes from socinfo feature_code/pcode, separately from speed_bin.
- * Until socinfo is available, expose only the 125 MHz / 0x32 point shared by both K90 DT tables.
+ * Until socinfo is available, expose only points on which all six live K90 DT tables agree:
+ * 222 and 342 MHz have the same level and bus votes in every table and no qcom,acd-level;
+ * 160 MHz is in five of them (not in the SKU 3/0 table) and has been the boot speed.
  */
 static const struct adreno8_gpu_level adreno8_boot_speeds[] = {
-	{ 125000000, 0x32 },
+	{ 160000000, 0x32, 2 },
+	{ 222000000, 0x34, 2 },
+	{ 342000000, 0x38, 3 },
 };
 
 uint32_t adreno8_speed_bin;
@@ -225,11 +230,9 @@ adreno8_arc_vote(const char *pri_n, const char *sec_n, uint32_t level, uint32_t 
 	return true;
 }
 
-/*
- * The dependency vote of one speed (Linux's dep loop): "while the 3D core runs at this speed the
- * memory rail must not fall below level X", told as a position in mx.lvl's list; 0xffffffff for
- * the idling zero speed.
- */
+/* Gen8 dependency encoding: all 18 bits at 31:14 are set, MX selector at 13:8,
+ * and 0xff at 7:0 for this board's absent CX dependency. The zero-speed row is
+ * 0xffffffff, matching the vendor gen8 RPMh driver. */
 
 bool
 adreno8_dep_vote(uint32_t level, uint32_t *vote)
@@ -254,7 +257,53 @@ adreno8_dep_vote(uint32_t level, uint32_t *vote)
 		printf("adreno8: %u: level %#x is above every level of \"mx.lvl\"\n", adreno8_step, level);
 		return false;
 	}
-	*vote = (0x3fffu << 14) | (j << 8) | 0xff;
+	*vote = 0xffffc000u | (j << 8) | 0xff;
+	return true;
+}
+
+static bool
+adreno8_rsc_read(void)
+{
+	/* Live K90 DT: Apps RSC reg[2], DRV2, eight TCS at d00 + n*2a0.
+	 * rpmh-rsc.c selects the register layout from ID, never from DRV number.
+	 * This observation does not claim ownership and performs no MMIO writes. */
+	static struct adreno8_block rsc = { "apps-rsc-drv2", 0x16520000, 0x10000 };
+	uint32_t id = adreno8_get(&rsc, "id", 0);
+	uint32_t major = (id >> 16) & 0xff, minor = (id >> 8) & 0xff;
+	uint32_t solver = adreno8_get(&rsc, "solver config", 4);
+	uint32_t config = adreno8_get(&rsc, "parent child config", 0xc);
+	uint32_t count = (config >> 12) & 0x3f, ncpt = (config >> 27) & 0x1f;
+
+	printf("adreno8: Apps RSC DRV2 version %u.%u, solver=%u, TCS=%u commands=%u; read-only\n",
+	    major, minor, (solver >> 24) & 1, count, ncpt);
+	if (id == 0 || id == 0xffffffffu || (major != 2 && major != 3) ||
+	    config == 0xffffffffu || count < 8 || ncpt == 0 || ncpt > 16) {
+		printf("adreno8: Apps RSC layout is not supported by this read-only probe\n");
+		return false;
+	}
+	adreno8_get(&rsc, "irq enable", 0xd00);
+	adreno8_get(&rsc, "irq status", 0xd04);
+	for (unsigned n = 0; n < 8; n++) {
+		uint32_t base = 0xd00 + n * 0x2a0;
+		uint32_t control = major >= 3 ? 0x24 : 0x14;
+		uint32_t command = major >= 3 ? 0x34 : 0x30;
+		uint32_t stride = major >= 3 ? 24 : 20;
+		uint32_t wait = adreno8_get(&rsc, "tcs wait", base + control - 4);
+		uint32_t ctrl = adreno8_get(&rsc, "tcs control", base + control);
+		uint32_t status = adreno8_get(&rsc, "tcs status", base + control + 4);
+		uint32_t enable = adreno8_get(&rsc, "tcs enable", base + control + 8);
+		printf("adreno8: Apps RSC TCS%u %s wait=%#x ctrl=%#x status=%#x enable=%#x\n",
+		    n, n < 3 ? "active" : n < 5 ? "sleep" : n < 7 ? "wake" : "fast",
+		    wait, ctrl, status, enable);
+		for (unsigned c = 0; c < ncpt; c++) {
+			if (!(enable & (1u << c))) continue;
+			uint32_t at = base + command + c * stride;
+			uint32_t msg = adreno8_get(&rsc, "command msgid", at);
+			uint32_t addr = adreno8_get(&rsc, "command address", at + 4);
+			uint32_t data = adreno8_get(&rsc, "command data", at + 8);
+			printf("adreno8: Apps RSC TCS%u cmd%u msg=%#x addr=%#x data=%#x\n", n, c, msg, addr, data);
+		}
+	}
 	return true;
 }
 
@@ -269,7 +318,7 @@ adreno8_step_outside(void)
 	adreno8_speed_bin = bin &= 0x1ff;
 	adreno8_speeds = adreno8_boot_speeds;
 	adreno8_speeds_count = sizeof(adreno8_boot_speeds) / sizeof(adreno8_boot_speeds[0]);
-	printf("adreno8: %u: speed bin %u; SKU unavailable, limiting GX to the common 125 MHz point\n", adreno8_step, bin);
+	printf("adreno8: %u: speed bin %u; SKU unavailable, limiting GX to the points all stock tables share\n", adreno8_step, bin);
 	adreno8_gx_count = 1;
 	adreno8_gx_hz[0] = 0;
 	adreno8_gx_level[0] = 0;                        /* the idling speed the message tables start with (Linux prepends the 0 Hz operating point) */
@@ -281,7 +330,7 @@ adreno8_step_outside(void)
 	printf("adreno8: %u: bin %u: the 3D core has %u speeds, to %u Hz; levels %#x..%#x\n", adreno8_step, bin, adreno8_speeds_count,
 	    adreno8_speeds[adreno8_speeds_count - 1].hz, adreno8_speeds[0].level, adreno8_speeds[adreno8_speeds_count - 1].level);
 
-	adreno8_announce("read the GPU's memory clock in the global clock controller; its register-bus clock (gcc_gpu_cfg_ahb) is one of the hypervisor's PROTECTED clocks here: no offset, no driver, nothing to read or write -- the loader runs it and step 2 will show whether registers answer");
+	adreno8_announce("read GCC DDRSS_GPU_AXI; preserve the loader's CFG_AHB configuration because gcc_sun_clocks has no entry for it; step 2 checks GPUCC register access");
 	adreno8_get(&adreno8_gcc, "ddrss_gpu_axi", GCC_DDRSS_GPU_AXI);
 
 	adreno8_announce("look up the GPU's supplies and bus monitors in the boot loader's list of what RPMh can switch (memory at 0x81c60000)");
@@ -296,18 +345,16 @@ adreno8_step_outside(void)
 	if (adreno8_cmd_db == NULL) {
 		printf("adreno8: %u: no list to read messages from: steps 13 on will fail\n", adreno8_step);
 	}
-	return true;
+	return adreno8_rsc_read() && adreno8_rpmh_arc_read();
 }
 
 /* ---- step 2: the GPU's clock controller, as left ------------------------------------------------------- */
 
 /*
- * dt: clock-controller@3d90000. The register list is drivers/clk/qcom/gpucc-sm8750.c: one power
- * switch (CX; there is no GX one for the OS to pull: the 3D core's power is the GMU firmware's
- * to give, through its PWR_CLK), thirteen branches, two clock sources over one PLL. TAYCAN_ELU,
- * the PLL, is a known set of values at unverified offsets on this SoC, so it is read, not
- * written: the GMU is left on the crystal's rate, which its firmware runs at anyway (the
- * "gmu clk" vote in the firmware's HFI protocol starts at TCXO). (TODO: PLL offsets.)
+ * DT clock-controller@3d90000: gpucc-sun.c and clk-alpha-pll.c define the Sun
+ * TAYCAN_ELU offsets. This step reads the inherited power, branch, PLL and RCG
+ * state. Step 5 keeps the GMU on the crystal by default; adreno8_gmuclk=1 uses
+ * the complete GMU/HUB clock path in adreno8_clock.c.
  */
 
 struct adreno8_block adreno8_gpucc = { "gpucc", 0x03d90000, 0x10000 };
@@ -335,7 +382,7 @@ adreno8_cx_is_on(void)
 bool
 adreno8_step_gpucc(void)
 {
-	adreno8_announce("read the GPU's clock controller as the boot loader left it: power switch, thirteen branches, two clock sources; the PLL area read only, its offsets are unverified (gpucc-sm8750.c)");
+	adreno8_announce("read the GPU clock controller's inherited power, branches, PLL and clock sources; Sun offsets follow gpucc-sun.c and clk-alpha-pll.c; this step performs no writes");
 	if (!adreno8_gpucc_answers()) {
 		printf("adreno8: %u: the GPU's clock controller does not answer (all ones)\n", adreno8_step);
 		return false;
@@ -357,6 +404,14 @@ adreno8_step_gpucc(void)
 	adreno8_get(&adreno8_gpucc, "memnoc_gfx", GPUCC_MEMNOC_GFX_CBCR);
 	adreno8_get(&adreno8_gpucc, "hub_aon", GPUCC_HUB_AON_CBCR);
 	adreno8_get(&adreno8_gpucc, "hub_cx_int", GPUCC_HUB_CX_INT_CBCR);
+	/* gpucc-sun.c enables these branches during probe, before KGSL starts. */
+	static const struct { const char *name; uint32_t offset; } always_on[] = {
+		{ "cb", 0x93a4 }, { "cxo_aon", 0x9008 }, { "gx_ahb_ff", 0x9064 },
+		{ "rscc_hub_aon", 0x93a8 }, { "rscc_xo_aon", 0x9004 }, { "sleep", 0x90cc }
+	};
+	for (unsigned i = 0; i < sizeof(always_on) / sizeof(always_on[0]); i++)
+		if (adreno8_get(&adreno8_gpucc, always_on[i].name, always_on[i].offset) == 0xffffffffu)
+			return false;
 	adreno8_get(&adreno8_gpucc, "gpu_cc_gmu bcr", GPUCC_GMU_BCR);
 	adreno8_get(&adreno8_gpucc, "gmu_clk_src command", GPUCC_GMU_RCGR);
 	adreno8_get(&adreno8_gpucc, "gmu_clk_src source", GPUCC_GMU_RCGR + 4);
@@ -380,6 +435,27 @@ adreno8_clock_on(struct adreno8_block *b, const char *name, uint32_t cbcr, bool 
 	printf("adreno8: %u: %s %s stays off (%#x)%s\n", adreno8_step, b->name, name, adreno8_rd(b->base + cbcr),
 	    must ? "" : "; its status bit is not one to rely on, going on");
 	return !must;
+}
+
+static bool
+adreno8_gemnoc_on(void)
+{
+	uint32_t value = adreno8_set(&adreno8_gcc, "gpu_gemnoc_gfx", GCC_GPU_GEMNOC_GFX, CBCR_ENABLE);
+
+	/* gcc-sun.c uses BRANCH_HALT_VOTED. clk-branch.c skips halt polling
+	 * with HWCG enabled; otherwise CLK_OFF=0 or NOC_FSM=ON confirms enable. */
+	for (unsigned i = 0; i < 200; i++) {
+		if (value == 0xffffffffu || !(value & CBCR_ENABLE)) {
+			printf("adreno8: %u: GCC GPU GEMNOC enable vote was not accepted (%#x)\n", adreno8_step, value);
+			return false;
+		}
+		if ((value & CBCR_HWCG) || !(value & CBCR_OFF) || (value & CBCR_NOC_STATUS) == CBCR_NOC_ON)
+			return true;
+		adreno8_sleep_us(1);
+		value = adreno8_rd(adreno8_gcc.base + GCC_GPU_GEMNOC_GFX);
+	}
+	printf("adreno8: %u: GCC GPU GEMNOC enable timed out (%#x)\n", adreno8_step, value);
+	return false;
 }
 
 bool
@@ -522,7 +598,7 @@ adreno8_step_cx_awake(void)
 	return true;
 }
 
-/* ---- step 5: its clocks ---------------------------------------------------------------------------------- */
+/* ---- step 5: GMU clocks and independent GCC/GPUCC bus branches ------------------------------------------ */
 
 bool
 adreno8_step_clocks(void)
@@ -534,22 +610,20 @@ adreno8_step_clocks(void)
 		printf("adreno8: %u: CX is off: step 3\n", adreno8_step);
 		return false;
 	}
-	adreno8_announce("in the global clock controller: the GPU's memory bus tap on (gcc 0x71150; its halt report is unreliable: tolerated); the register-bus clock of the GPU controller is the hypervisor's protected one: nothing to write");
+	adreno8_announce("vote for GCC DDRSS_GPU_AXI (0x71150; halt timeout is tolerated) and GCC GPU_GEMNOC_GFX (0x71010); preserve the loader's CFG_AHB configuration");
 	if (!adreno8_clock_on(&adreno8_gcc, "ddrss_gpu_axi", GCC_DDRSS_GPU_AXI, false)) {
 		return false;
 	}
-
-	adreno8_announce("in the GPU's clock controller: the GMU's clock source to the crystal (parent 0; adreno8_gmuclk=1 would ask PLL0_OUT_EVEN, parent 2, whose PLL offsets are unverified: see the header)");
-	if (!adreno8_clock_source("gmu_clk_src", GPUCC_GMU_RCGR, adreno8_gmu_from_pll ? (2u << 8) | 1u : 0)) {
+	if (!adreno8_gemnoc_on())
 		return false;
-	}
+
 	if (adreno8_gmu_from_pll) {
-		adreno8_announce("the PLL area again, now that a vote for it is out (offsets unverified: read for the record)");
-		for (unsigned i = 0; i < 8; i++) {
-			adreno8_get(&adreno8_gpucc, "pll0 area, read only", 4 * i);
-		}
+		if (!adreno8_clock_boot()) return false;
+	} else {
+		adreno8_announce("select the GMU crystal clock for the default clock experiment");
+		if (!adreno8_clock_source("gmu_clk_src", GPUCC_GMU_RCGR, 0)) return false;
 	}
-	adreno8_announce("in the GPU's clock controller: the clocks of the GMU and of the way in on; the hub's source is left as the loader set it (its parents are unverified); the ones whose halt report lies are tolerated");
+	adreno8_announce("enable GPUCC GMU, AHB and MEMNOC_GFX (0x90f4) branches; MEMNOC_GFX is independent of the two GCC branches; optional branch halt timeouts remain tolerated");
 	if (!adreno8_clock_on(&adreno8_gpucc, "cxo", GPUCC_CX_CBCR, true) ||
 	    !adreno8_clock_on(&adreno8_gpucc, "cx_gmu", GPUCC_CX_GMU_CBCR, true) ||
 	    !adreno8_clock_on(&adreno8_gpucc, "ahb", GPUCC_AHB_CBCR, false) ||
@@ -570,6 +644,23 @@ adreno8_step_clocks(void)
 	adreno8_get(&adreno8_gpucc, "cx_gmu", GPUCC_CX_GMU_CBCR);
 	adreno8_get(&adreno8_gpucc, "gpu_cc_gmu bcr", GPUCC_GMU_BCR);
 	adreno8_get(&adreno8_gpucc, "ahb", GPUCC_AHB_CBCR);
+	/* gen8_reg.h: CX_MISC AHB timeout controls. */
+	static const char *const ahb[] = {"AHB timeout AON", "AHB timeout GMU", "AHB timeout CP",
+		"AHB timeout VBIF SMMU", "AHB timeout HOST"};
+	uint32_t inherited[sizeof(ahb) / sizeof(ahb[0])];
+	for (unsigned i = 0; i < sizeof(ahb) / sizeof(ahb[0]); i++) {
+		inherited[i] = adreno8_get(&adreno8_cx_misc, ahb[i], 0x40 + 4 * i);
+		if (inherited[i] == 0xffffffffu) return false;
+	}
+	if (!adreno8_gmu_from_pll) return true;
+	/* The verified HUB200 path uses gen8's 2^19-cycle timeout, below its 3410 us NOC limit. */
+	for (unsigned i = 0; i < sizeof(ahb) / sizeof(ahb[0]); i++) {
+		if (inherited[i] == 0x1b12) continue;
+		adreno8_reset_required = true;
+		adreno8_put(&adreno8_cx_misc, ahb[i], 0x40 + 4 * i, 0x1b12);
+		adreno8_settle();
+		if (adreno8_get(&adreno8_cx_misc, ahb[i], 0x40 + 4 * i) != 0x1b12) return false;
+	}
 	return true;
 }
 
@@ -621,4 +712,14 @@ adreno8_scm_gpu_init(void)
 	/* kgsl_util.h: mandatory register access and TSENSE IDs; BCL and CLX are disabled. */
 	status = adreno8_scm_call(0x42002801, 1, 0x9, 0, 0, 0, &answer);
 	return status == 0 || status == -4;
+}
+
+/* kgsl_iommu.c configures the ordinary GPU aperture after default TTBR0.
+ * MiCode f66f8c8 qcom_scm_kgsl_set_smmu_aperture checks only transport status; this port uses CB0. */
+bool
+adreno8_scm_gpu_aperture(void)
+{
+	uint64_t answer = 0;
+
+	return adreno8_scm_call(0x42000c1b, 4, 0xffff0000, 0xffffffff, 0xffffffff, 0xffffffff, &answer) == 0;
 }

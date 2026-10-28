@@ -1,0 +1,89 @@
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+index 07143d539042..966e8ef38d3a 100644
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -907,6 +907,9 @@ ml_get_machine_mem(void)
+ 	return machine_info.memory_size;
+ }
+ 
++extern void loader_return(void);
++extern void redwood_adreno_stop(void);
++
+ __attribute__((noreturn))
+ void
+ halt_all_cpus(boolean_t reboot)
+@@ -918,6 +921,9 @@ halt_all_cpus(boolean_t reboot)
+ 		printf("CPU halted\n");
+ 		PEHaltRestart(kPEHaltCPU);
+ 	}
++	/* No platform driver powers the machine off: hand control (and the log) back to the loader. */
++	redwood_adreno_stop();
++	loader_return();
+ 	while (1) {
+ 		;
+ 	}
+@@ -1140,6 +1146,21 @@ ml_read_chip_revision(unsigned int *rev __unused)
+ #endif
+ }
+ 
++/* How long processor cpu_id has been idle since it started, in mach_absolute_time() units (redwood_cpufreq.c's cpuload). */
++bool ml_cpu_idle_time(int cpu_id, uint64_t *idle);
++
++bool
++ml_cpu_idle_time(int cpu_id, uint64_t *idle)
++{
++	struct recount_usage usage = { 0 };
++
++	if (cpu_id < 0 || cpu_id >= MAX_CPUS || processor_array[cpu_id] == PROCESSOR_NULL) {
++		return false;
++	}
++	recount_processor_usage(&processor_array[cpu_id]->pr_recount, &usage, idle);
++	return true;
++}
++
+ void
+ ml_parse_cpu_topology(void)
+ {
+@@ -1414,7 +1435,11 @@ ml_get_boot_cluster_type(void)
+ int
+ ml_get_cpu_number(uint32_t phys_id)
+ {
++	#if defined(GENERIC_PSCI_SMP)
++	phys_id &= MPIDR_AFF2_MASK | MPIDR_AFF1_MASK | MPIDR_AFF0_MASK;
++#else
+ 	phys_id &= MPIDR_AFF1_MASK | MPIDR_AFF0_MASK;
++#endif
+ 
+ 	for (unsigned i = 0; i < topology_info.num_cpus; i++) {
+ 		if (topology_info.cpus[i].phys_id == phys_id) {
+@@ -2708,8 +2733,16 @@ _enable_virtual_timer(void)
+ 	uint64_t cntvctl = CNTV_CTL_EL0_ENABLE; /* One wants to use 32 bits, but "mrs" prefers it this way */
+ 
+ 	__builtin_arm_wsr64(KERNEL_CNTV_CTL_EL0, cntvctl);
++#if defined(APPLE_ARM64_ARCH_FAMILY)
+ 	/* disable the physical timer as a precaution, as its registers reset to architecturally unknown values */
+ 	__builtin_arm_wsr64("CNTP_CTL_EL0", CNTP_CTL_EL0_IMASKED);
++#else
++	/*
++	 * When running at EL1 under a third-party hypervisor (e.g. Qualcomm's),
++	 * the EL1 physical timer registers are trapped and the access faults.
++	 * The guest only owns the virtual timer.
++	 */
++#endif
+ #if HAS_APPLE_GENERIC_TIMER
+ 	__builtin_arm_wsr64("S3_1_C15_C13_4", CNTP_CTL_EL0_IMASKED);
+ #endif
+@@ -3395,6 +3428,13 @@ ml_unsafe_kernel_text_init(void)
+ 		_unsafe_kernel_text_initialized = true;
+ 		_unsafe_kernel_text = (0 == *(const int *)value);
+ 	}
++#if defined(BCM2837)
++	/* redwood: no iBoot to say so, and no CTRR: the kernel's text is never locked down */
++	if (!_unsafe_kernel_text_initialized) {
++		_unsafe_kernel_text_initialized = true;
++		_unsafe_kernel_text = true;
++	}
++#endif /* BCM2837 */
+ }
+ STARTUP(TUNABLES, STARTUP_RANK_FIRST, ml_unsafe_kernel_text_init);
+ 
