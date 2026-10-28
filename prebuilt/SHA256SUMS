@@ -1,7 +1,7 @@
-Built 2026-10-24 09:55 from this tree.
+Built 2026-10-28 09:53 from this tree.
 
-bfbfddc6763412d96e3d7a372477fc140f629a7e087818fe94b2ce6821af8666  prebuilt/mach.development.bcm2837
-57851296ad260c2840fd6a42526f26bf71357271e56eab553322913837a2f784  prebuilt/loader.efi
+77b440b02525ae56a153a7e94c43b98233c1ec89941d4c49c0e2f3166fb648c9  prebuilt/mach.development.bcm2837
+8306f9490bc53b3b551e637ba00d3c5d01680a526dc7d6fd02ab11e006b5ea75  prebuilt/loader.efi
 c25b95de00e4b2dffa5e1ede1810ff80e29b61f6cc39dc1ae2286620902acd20  prebuilt/uefi/BootShim.bin
 55037fd1a6d6cd861add76c2083d5d4321373bf714acae3f6a40deb004c27d47  prebuilt/uefi/mkbootimg.py
 b5a2c96250612366ea272ffac6d9744aaf4b45aacd96aa7cfcb931ee3b558259  prebuilt/uefi/ramdisk
